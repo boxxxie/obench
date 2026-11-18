@@ -176,7 +176,10 @@ resolution]` marks a benchmark whose sample is less than 100 clock ticks long (a
 
 `allocs / bytes` counts allocator calls that obtain memory, which includes resizes: building
 a 64-item dynamic array from capacity 16 shows `3.0 / 512 B` (one allocation, two resizes).
-Temp-only allocations show as `0 (tmp 3.0/512 B)`.
+Temp-only allocations show as `0 (tmp 3.0/512 B)`. `--untimed-allocs` leaves the counting
+allocator out of the timed samples and measures allocations in one untimed batch afterwards;
+because the counts and the `@zero_alloc` check come from that single batch, a rare allocation
+can slip through.
 
 On x86 there is also a `cycles` column with time-stamp counter ticks, which run at the CPU's
 nominal frequency. On other architectures `read_cycle_counter` reads a fixed-frequency timer
@@ -229,7 +232,7 @@ pick up these environment variables. Command-line flags of the same name overrid
 	OBENCH_SAMPLES, OBENCH_WARMUP_MS Sample count and warmup
 	OBENCH_THRESHOLD                 Same as --threshold
 	OBENCH_ZERO_ALLOC                1 or true to enable
-	OBENCH_UNTIMED_ALLOCS            1 or true to measure allocations in one untimed batch
+	OBENCH_UNTIMED_ALLOCS            1 or true (same as --untimed-allocs)
 	OBENCH_FAIL_ON_REGRESSION        1 or true to enable
 	OBENCH_BASELINE                  Baseline to compare against
 	OBENCH_SAVE_BASELINE             Where to save one

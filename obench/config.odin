@@ -19,7 +19,7 @@ Config :: struct {
 	fixed_batch_size:     int, // 0 = auto-calibrate
 	reset_temp_per_iter:  bool, // Default: true (frees the benchmark's private temp arena after every sample batch)
 	enforce_zero_allocs:  bool, // Fail if heap allocations > 0 inside measured loop
-	untimed_alloc_check:  bool, // Default: DEFAULT_UNTIMED_ALLOCS (skip allocation wrappers during timed samples)
+	untimed_alloc_check:  bool, // Default: DEFAULT_UNTIMED_ALLOCS (count allocations and check @zero_alloc in one untimed batch after sampling)
 	fail_on_regression:   bool, // Fail suite if any benchmark regresses beyond noise_threshold_pct
 	filter:               string, // Substring filter on the full benchmark name
 	noise_threshold_pct:  f64, // Default: 2.0%

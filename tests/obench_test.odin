@@ -421,6 +421,7 @@ test_apply_args :: proc(t: ^testing.T) {
 			"--warmup",
 			"3",
 			"--zero-alloc",
+			"--untimed-allocs",
 			"--json",
 			"out.json",
 			"--no-histogram",
@@ -430,6 +431,7 @@ test_apply_args :: proc(t: ^testing.T) {
 	testing.expect_value(t, cfg.sample_count, 7)
 	testing.expect_value(t, cfg.warmup_time, 3 * time.Millisecond)
 	testing.expect_value(t, cfg.enforce_zero_allocs, true)
+	testing.expect_value(t, cfg.untimed_alloc_check, true)
 	testing.expect_value(t, cfg.json_export_path, "out.json")
 	testing.expect_value(t, cfg.show_histogram, false)
 }
@@ -1379,4 +1381,27 @@ test_untimed_alloc_check_matches_alloc_metrics_and_zero_alloc :: proc(t: ^testin
 	testing.expect(t, s_zero.results[0].zero_alloc_failed)
 	testing.expect_value(t, s_zero.results[0].violation_size, 24)
 	testing.expect(t, s_zero.results[0].violation_loc.line > 0)
+
+	hc: obench.Counting_Allocator
+	obench.counting_allocator_init(&hc, context.allocator)
+	hc.alloc_count = 6
+	hc.bytes_allocated = 96
+	samples := []f64{10.0, 12.0}
+	st_pos := obench.compute_stats(samples, samples, 3, 6, 0, 0, &hc, nil, nil, context.allocator)
+	testing.expect_value(t, st_pos.allocs_per_op, 1.0)
+	st_untimed := obench.compute_stats(
+		samples,
+		samples,
+		3,
+		6,
+		0,
+		0,
+		&hc,
+		nil,
+		nil,
+		context.allocator,
+		3,
+	)
+	testing.expect_value(t, st_untimed.allocs_per_op, 2.0)
+	testing.expect_value(t, st_untimed.alloc_bytes_per_op, 32.0)
 }

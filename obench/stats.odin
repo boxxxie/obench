@@ -131,8 +131,8 @@ compute_stats :: proc(
 	heap_counter: ^Counting_Allocator,
 	temp_counter: ^Counting_Allocator,
 	custom_metrics: []Custom_Metric = nil,
-	alloc_iters: u64 = 0,
 	allocator := context.allocator,
+	alloc_iters: u64 = 0,
 ) -> Stats {
 	n := len(ns_per_op)
 	if n == 0 {

@@ -381,8 +381,8 @@ _execute_entry :: proc(
 		&heap_counter,
 		&temp_counter,
 		last_custom[:last_custom_count],
-		alloc_iters,
 		s.allocator,
+		alloc_iters,
 	)
 	st.samples_ns = slice.clone(ns_samples[:], s.allocator)
 	last_custom_count = 0 // Ownership of the unit strings moves to the result.
