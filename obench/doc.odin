@@ -176,7 +176,10 @@ resolution]` marks a benchmark whose sample is less than 100 clock ticks long (a
 
 `allocs / bytes` counts allocator calls that obtain memory, which includes resizes: building
 a 64-item dynamic array from capacity 16 shows `3.0 / 512 B` (one allocation, two resizes).
-Temp-only allocations show as `0 (tmp 3.0/512 B)`.
+Temp-only allocations show as `0 (tmp 3.0/512 B)`. `--untimed-allocs` leaves the counting
+allocator out of the timed samples and measures allocations in one untimed batch afterwards;
+because the counts and the `@zero_alloc` check come from that single batch, a rare allocation
+can slip through.
 
 On x86 there is also a `cycles` column with time-stamp counter ticks, which run at the CPU's
 nominal frequency. On other architectures `read_cycle_counter` reads a fixed-frequency timer
@@ -229,6 +232,7 @@ pick up these environment variables. Command-line flags of the same name overrid
 	OBENCH_SAMPLES, OBENCH_WARMUP_MS Sample count and warmup
 	OBENCH_THRESHOLD                 Same as --threshold
 	OBENCH_ZERO_ALLOC                1 or true to enable
+	OBENCH_UNTIMED_ALLOCS            1 or true (same as --untimed-allocs)
 	OBENCH_FAIL_ON_REGRESSION        1 or true to enable
 	OBENCH_BASELINE                  Baseline to compare against
 	OBENCH_SAVE_BASELINE             Where to save one
@@ -249,6 +253,8 @@ Compile-time defaults can be changed with `-define`:
 	DEFAULT_MAX_BENCH_MS  : int    : #config(OBENCH_MAX_BENCH_MS,  1200)
 	// Enforce zero heap allocations globally across all benchmarks.
 	DEFAULT_ZERO_ALLOC    : bool   : #config(OBENCH_ZERO_ALLOC,    false)
+	// Measure allocations in a single untimed pass after timed samples.
+	DEFAULT_UNTIMED_ALLOCS: bool   : #config(OBENCH_UNTIMED_ALLOCS, false)
 	// Enable ANSI color output in terminal reports.
 	DEFAULT_COLOR         : bool   : #config(OBENCH_COLOR,         true)
 	// Render 8-bin Unicode distribution sparklines in terminal reports.
@@ -334,6 +340,8 @@ DEFAULT_MIN_SAMPLE_US: int : #config(OBENCH_MIN_SAMPLE_US, 1000)
 DEFAULT_MAX_BENCH_MS: int : #config(OBENCH_MAX_BENCH_MS, 1200)
 // Enforce zero heap allocations globally across all benchmarks.
 DEFAULT_ZERO_ALLOC: bool : #config(OBENCH_ZERO_ALLOC, false)
+// Measure allocations in a single untimed pass after timed samples.
+DEFAULT_UNTIMED_ALLOCS: bool : #config(OBENCH_UNTIMED_ALLOCS, false)
 // Enable ANSI color output in terminal reports.
 DEFAULT_COLOR: bool : #config(OBENCH_COLOR, true)
 // Render 8-bin Unicode distribution sparklines in terminal reports.
