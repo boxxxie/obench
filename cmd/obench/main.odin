@@ -2,6 +2,7 @@ package main
 
 import obench "../../obench"
 import "base:runtime"
+import "core:encoding/json"
 import "core:flags"
 import "core:fmt"
 import "core:odin/ast"
@@ -41,6 +42,8 @@ CLI_Options :: struct {
 	no_bounds_check:    bool,
 	collections:        [dynamic]string,
 	defines:            [dynamic]string,
+	extra_linker_flags: [dynamic]string,
+	custom_attributes:  [dynamic]string,
 	save_baseline:      string,
 	load_baseline:      string,
 	json_path:          string,
@@ -129,8 +132,10 @@ BUILD OPTIONS (forwarded to the Odin compiler):
   -o, --opt <mode>               speed (default), aggressive, size, minimal, none
       --microarch <arch>         -microarch:<arch>, e.g. native
       --no-bounds-check          -no-bounds-check
-      --collection <name=path>   -collection:<name>=<path> (repeatable)
+      --collection <name=path>   -collection:<name>=<path> (repeatable; overrides ols.json)
       --define <KEY=VAL>         -define:<KEY>=<VAL> (repeatable)
+      --extra-linker-flags <val> -extra-linker-flags:<val> (repeatable)
+      --custom-attribute <name>  -custom-attribute:<name> (repeatable)
 
 The compiler is taken from $ODIN when set, otherwise 'odin' on PATH.
 Exit status: 0 success, 1 benchmark/regression/build failure or an unparsable *_bench.odin
@@ -153,6 +158,8 @@ _Cli_Flags :: struct {
 	no_bounds_check:    bool,
 	collection:         [dynamic]string,
 	define:             [dynamic]string,
+	extra_linker_flags: [dynamic]string,
+	custom_attribute:   [dynamic]string,
 	save_baseline:      string,
 	baseline:           string,
 	threshold:          f64,
@@ -229,6 +236,8 @@ parse_cli_args :: proc(
 	parse_err := flags.parse(&f, rest, .Unix, allocator = allocator)
 	opts.collections = f.collection
 	opts.defines = f.define
+	opts.extra_linker_flags = f.extra_linker_flags
+	opts.custom_attributes = f.custom_attribute
 	defer delete(f.overflow)
 
 	switch e in parse_err {
@@ -304,6 +313,16 @@ parse_cli_args :: proc(
 			return opts, fmt.tprintf("--define expects KEY=VALUE, got '%s'", d)
 		}
 	}
+	for ef in f.extra_linker_flags {
+		if strings.trim_space(ef) == "" {
+			return opts, "--extra-linker-flags expects a non-empty string"
+		}
+	}
+	for ca in f.custom_attribute {
+		if strings.trim_space(ca) == "" {
+			return opts, "--custom-attribute expects a non-empty name"
+		}
+	}
 
 	opts.filter = f.filter
 	opts.samples = f.samples if f.samples != UNSET else 0
@@ -347,6 +366,8 @@ parse_cli_args :: proc(
 destroy_cli_options :: proc(opts: ^CLI_Options) {
 	delete(opts.collections)
 	delete(opts.defines)
+	delete(opts.extra_linker_flags)
+	delete(opts.custom_attributes)
 }
 
 /*
@@ -1437,6 +1458,79 @@ _run_process :: proc(cmd: []string) -> bool {
 	return wait_err == nil && state.exited && state.exit_code == 0
 }
 
+@(private = "file")
+_Ols_Collection :: struct {
+	name: string `json:"name"`,
+	path: string `json:"path"`,
+}
+
+@(private = "file")
+_Ols_File :: struct {
+	collections: []_Ols_Collection `json:"collections"`,
+}
+
+/*
+Walks upward from `start_dir` looking for `ols.json` and returns `name=abs_path` collection
+entries from the nearest file found.
+*/
+discover_ols_collections :: proc(
+	start_dir: string,
+	allocator := context.temp_allocator,
+) -> [dynamic]string {
+	result := make([dynamic]string, allocator)
+	cur, abs_err := os.get_absolute_path(start_dir, context.temp_allocator)
+	if abs_err != nil || cur == "" {
+		cur = start_dir
+	}
+	for cur != "" {
+		ols_path, _ := filepath.join({cur, "ols.json"}, context.temp_allocator)
+		if os.exists(ols_path) {
+			data, read_err := os.read_entire_file(ols_path, context.temp_allocator)
+			if read_err == nil {
+				doc: _Ols_File
+				if json.unmarshal(data, &doc, allocator = context.temp_allocator) == nil {
+					for col in doc.collections {
+						if col.name == "" || col.path == "" {
+							continue
+						}
+						if col.name == "core" || col.name == "base" || col.name == "vendor" {
+							continue
+						}
+						resolved := col.path
+						if !filepath.is_abs(col.path) {
+							resolved, _ = filepath.join({cur, col.path}, context.temp_allocator)
+						}
+						append(
+							&result,
+							fmt.aprintf("%s=%s", col.name, resolved, allocator = allocator),
+						)
+					}
+				}
+			}
+			break
+		}
+		git_path, _ := filepath.join({cur, ".git"}, context.temp_allocator)
+		if os.exists(git_path) {
+			break
+		}
+		parent := filepath.dir(cur)
+		if parent == cur || parent == "." || parent == "" {
+			break
+		}
+		cur = parent
+	}
+	return result
+}
+
+@(private = "file")
+_collection_name :: proc "contextless" (entry: string) -> string {
+	eq := strings.index_byte(entry, '=')
+	if eq > 0 {
+		return entry[:eq]
+	}
+	return entry
+}
+
 /*
 Builds and runs one package. Returns false if the build or the benchmarks failed.
 `suite_name` names the generated runner's suite; a package with its own main names its own.
@@ -1500,11 +1594,31 @@ run_package :: proc(
 	if opts.microarch != "" {
 		append(&cmd, fmt.tprintf("-microarch:%s", opts.microarch))
 	}
+	seen_collections := make(map[string]bool, context.temp_allocator)
+	seen_collections[TARGET_COLLECTION] = true
+	seen_collections[LIB_COLLECTION] = true
+	seen_collections["core"] = true
+	seen_collections["base"] = true
+	seen_collections["vendor"] = true
 	for col in opts.collections {
 		append(&cmd, fmt.tprintf("-collection:%s", col))
+		seen_collections[_collection_name(col)] = true
+	}
+	for col in discover_ols_collections(pkg.dir_path) {
+		name := _collection_name(col)
+		if name not_in seen_collections {
+			append(&cmd, fmt.tprintf("-collection:%s", col))
+			seen_collections[name] = true
+		}
 	}
 	for def in opts.defines {
 		append(&cmd, fmt.tprintf("-define:%s", def))
+	}
+	for ef in opts.extra_linker_flags {
+		append(&cmd, fmt.tprintf("-extra-linker-flags:%s", ef))
+	}
+	for ca in opts.custom_attributes {
+		append(&cmd, fmt.tprintf("-custom-attribute:%s", ca))
 	}
 
 	if !_run_process(cmd[:]) {

@@ -657,3 +657,58 @@ test_discover_no_alias_bencher :: proc(t: ^testing.T) {
 		testing.expect_value(t, pkg.benches[0].proc_name, "bench_fast")
 	}
 }
+
+@(test)
+test_parse_cli_extra_compiler_flags :: proc(t: ^testing.T) {
+	opts, err := parse_cli_args(
+		{
+			"run",
+			"examples",
+			"--extra-linker-flags",
+			"-lm -ldl",
+			"--custom-attribute",
+			"telemetry_schema",
+		},
+	)
+	defer destroy_cli_options(&opts)
+	testing.expect_value(t, err, "")
+	testing.expect_value(t, len(opts.extra_linker_flags), 1)
+	testing.expect_value(t, opts.extra_linker_flags[0], "-lm -ldl")
+	testing.expect_value(t, len(opts.custom_attributes), 1)
+	testing.expect_value(t, opts.custom_attributes[0], "telemetry_schema")
+}
+
+@(test)
+test_discover_ols_collections :: proc(t: ^testing.T) {
+	root, err := os.make_directory_temp("", "obench-ols-test-*", context.temp_allocator)
+	if !testing.expect_value(t, err, nil) {
+		return
+	}
+	defer os.remove_all(root)
+
+	_write_test_file(
+		t,
+		root,
+		".",
+		"ols.json",
+		`{"collections":[{"name":"core","path":"/usr/lib/odin/core"},{"name":"mimir","path":"./mimir"},{"name":"xitdb","path":"./deps/xitdb"}]}`,
+	)
+	bench_dir, _ := filepath.join({root, "benchmarks", "sub"}, context.temp_allocator)
+	_write_test_file(t, root, "benchmarks/sub", "x_bench.odin", "package x_bench\n")
+
+	cols := discover_ols_collections(bench_dir)
+	testing.expect_value(t, len(cols), 2)
+	if len(cols) == 2 {
+		expected_mimir, _ := filepath.join({root, "mimir"}, context.temp_allocator)
+		expected_xitdb, _ := filepath.join({root, "deps", "xitdb"}, context.temp_allocator)
+		testing.expect_value(t, cols[0], fmt.tprintf("mimir=%s", expected_mimir))
+		testing.expect_value(t, cols[1], fmt.tprintf("xitdb=%s", expected_xitdb))
+	}
+
+	nested_git, _ := filepath.join({root, "nested_repo", ".git"}, context.temp_allocator)
+	nested_pkg, _ := filepath.join({root, "nested_repo", "benches"}, context.temp_allocator)
+	_ = os.make_directory_all(nested_git)
+	_write_test_file(t, root, "nested_repo/benches", "y_bench.odin", "package y_bench\n")
+	nested_cols := discover_ols_collections(nested_pkg)
+	testing.expect_value(t, len(nested_cols), 0)
+}
