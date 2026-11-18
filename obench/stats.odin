@@ -116,7 +116,9 @@ Suite_Summary :: struct {
 /*
 Computes full parametric and non-parametric statistics from sample slices.
 `ns_per_op` and `cycles_per_op` contain one entry per sample (already divided by `batch_size`).
-The returned `samples_ns` refers to `ns_per_op`, so clone it if the stats outlive the slice.
+When `alloc_iters` is non-zero, per-op allocation rates divide by `alloc_iters` instead of
+`total_iters`. The returned `samples_ns` refers to `ns_per_op`, so clone it if the stats
+outlive the slice.
 */
 @(require_results)
 compute_stats :: proc(
@@ -129,6 +131,7 @@ compute_stats :: proc(
 	heap_counter: ^Counting_Allocator,
 	temp_counter: ^Counting_Allocator,
 	custom_metrics: []Custom_Metric = nil,
+	alloc_iters: u64 = 0,
 	allocator := context.allocator,
 ) -> Stats {
 	n := len(ns_per_op)
@@ -267,8 +270,9 @@ compute_stats :: proc(
 	temp_bytes_per_op: f64 = 0
 	peak_heap: i64 = 0
 
-	if total_iters > 0 {
-		iters_f := f64(total_iters)
+	eff_alloc_iters := alloc_iters > 0 ? alloc_iters : total_iters
+	if eff_alloc_iters > 0 {
+		iters_f := f64(eff_alloc_iters)
 		if heap_counter != nil {
 			ac := intrinsics.atomic_load_explicit(&heap_counter.alloc_count, .Relaxed)
 			rc := intrinsics.atomic_load_explicit(&heap_counter.resize_count, .Relaxed)

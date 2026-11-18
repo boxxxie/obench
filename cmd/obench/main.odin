@@ -49,6 +49,7 @@ CLI_Options :: struct {
 	spall_path:         string,
 	threshold_pct:      f64,
 	zero_alloc:         bool,
+	untimed_allocs:     bool,
 	fail_on_regression: bool,
 	no_color:           bool,
 	no_histogram:       bool,
@@ -110,6 +111,7 @@ RUN OPTIONS:
   -n, --samples <count>          Samples per benchmark (default: 50)
   -w, --warmup <ms>              Warmup per benchmark in milliseconds (default: 40)
       --zero-alloc               Treat every benchmark as @zero_alloc
+      --untimed-allocs           Measure allocations in one untimed batch after sampling
       --baseline <file.json>     Compare against a saved report (each package with its own suite)
       --save-baseline <file>     Save results as a JSON report (alias of --json)
       --threshold <pct>          Minimum median change counted as significant (default: 2.0)
@@ -159,6 +161,7 @@ _Cli_Flags :: struct {
 	csv:                string,
 	spall:              string,
 	zero_alloc:         bool,
+	untimed_allocs:     bool,
 	fail_on_regression: bool,
 	no_color:           bool,
 	no_histogram:       bool,
@@ -315,6 +318,7 @@ parse_cli_args :: proc(
 	opts.csv_path = f.csv
 	opts.spall_path = f.spall
 	opts.zero_alloc = f.zero_alloc
+	opts.untimed_allocs = f.untimed_allocs
 	opts.fail_on_regression = f.fail_on_regression
 	opts.no_color = f.no_color
 	opts.no_histogram = f.no_histogram
@@ -1372,6 +1376,9 @@ _runtime_args :: proc(
 	append(&args, "--threshold", fmt.aprintf("%f", opts.threshold_pct, allocator = allocator))
 	if opts.zero_alloc {
 		append(&args, "--zero-alloc")
+	}
+	if opts.untimed_allocs {
+		append(&args, "--untimed-allocs")
 	}
 	if opts.fail_on_regression {
 		append(&args, "--fail-on-regression")
