@@ -40,6 +40,7 @@ CLI_Options :: struct {
 	opt_mode:           string,
 	microarch:          string,
 	no_bounds_check:    bool,
+	ols:                bool,
 	collections:        [dynamic]string,
 	defines:            [dynamic]string,
 	extra_linker_flags: [dynamic]string,
@@ -130,9 +131,10 @@ BUILD OPTIONS (forwarded to the Odin compiler):
   -o, --opt <mode>               speed (default), aggressive, size, minimal, none
       --microarch <arch>         -microarch:<arch>, e.g. native
       --no-bounds-check          -no-bounds-check
-      --collection <name=path>   -collection:<name>=<path> (repeatable; overrides ols.json)
+      --collection <name=path>   -collection:<name>=<path> (repeatable; overrides --ols)
+      --ols                      Add collections from the nearest ols.json
       --define <KEY=VAL>         -define:<KEY>=<VAL> (repeatable)
-      --extra-linker-flags <val> -extra-linker-flags:<val> (repeatable)
+      --extra-linker-flags <val> -extra-linker-flags:<val> (repeatable, space-joined)
       --custom-attribute <name>  -custom-attribute:<name> (repeatable)
 
 The compiler is taken from $ODIN when set, otherwise 'odin' on PATH.
@@ -154,6 +156,7 @@ _Cli_Flags :: struct {
 	opt:                string,
 	microarch:          string,
 	no_bounds_check:    bool,
+	ols:                bool,
 	collection:         [dynamic]string,
 	define:             [dynamic]string,
 	extra_linker_flags: [dynamic]string,
@@ -327,6 +330,7 @@ parse_cli_args :: proc(
 	opts.threshold_pct = f.threshold
 	opts.microarch = f.microarch
 	opts.no_bounds_check = f.no_bounds_check
+	opts.ols = f.ols
 	opts.save_baseline = f.save_baseline
 	opts.load_baseline = f.baseline
 	opts.json_path = f.json
@@ -1463,14 +1467,18 @@ _Ols_File :: struct {
 }
 
 /*
-Walks upward from `start_dir` looking for `ols.json` and returns `name=abs_path` collection
-entries from the nearest file found.
+Walks upward from `start_dir` (stopping at the enclosing `.git` root) looking for `ols.json`
+and returns `name=abs_path` collection entries from the nearest file found, together with its
+path (or `""` if none was found).
 */
 discover_ols_collections :: proc(
 	start_dir: string,
 	allocator := context.temp_allocator,
-) -> [dynamic]string {
-	result := make([dynamic]string, allocator)
+) -> (
+	collections: [dynamic]string,
+	found_path: string,
+) {
+	collections = make([dynamic]string, allocator)
 	cur, abs_err := os.get_absolute_path(start_dir, context.temp_allocator)
 	if abs_err != nil || cur == "" {
 		cur = start_dir
@@ -1478,27 +1486,37 @@ discover_ols_collections :: proc(
 	for cur != "" {
 		ols_path, _ := filepath.join({cur, "ols.json"}, context.temp_allocator)
 		if os.exists(ols_path) {
+			found_path = strings.clone(ols_path, allocator)
 			data, read_err := os.read_entire_file(ols_path, context.temp_allocator)
-			if read_err == nil {
-				doc: _Ols_File
-				if json.unmarshal(data, &doc, allocator = context.temp_allocator) == nil {
-					for col in doc.collections {
-						if col.name == "" || col.path == "" {
-							continue
-						}
-						if col.name == "core" || col.name == "base" || col.name == "vendor" {
-							continue
-						}
-						resolved := col.path
-						if !filepath.is_abs(col.path) {
-							resolved, _ = filepath.join({cur, col.path}, context.temp_allocator)
-						}
-						append(
-							&result,
-							fmt.aprintf("%s=%s", col.name, resolved, allocator = allocator),
-						)
-					}
+			if read_err != nil {
+				fmt.eprintfln("obench: warning: could not read '%s' (%v)", ols_path, read_err)
+				break
+			}
+			doc: _Ols_File
+			if json_err := json.unmarshal(data, &doc, allocator = context.temp_allocator);
+			   json_err != nil {
+				fmt.eprintfln("obench: warning: could not parse '%s' (%v)", ols_path, json_err)
+				break
+			}
+			for col in doc.collections {
+				if col.name == "" || col.path == "" {
+					continue
 				}
+				if col.name == "core" ||
+				   col.name == "base" ||
+				   col.name == "vendor" ||
+				   col.name == TARGET_COLLECTION ||
+				   col.name == LIB_COLLECTION {
+					continue
+				}
+				resolved := col.path
+				if !filepath.is_abs(col.path) {
+					resolved, _ = filepath.join({cur, col.path}, context.temp_allocator)
+				}
+				append(
+					&collections,
+					fmt.aprintf("%s=%s", col.name, resolved, allocator = allocator),
+				)
 			}
 			break
 		}
@@ -1512,7 +1530,7 @@ discover_ols_collections :: proc(
 		}
 		cur = parent
 	}
-	return result
+	return collections, found_path
 }
 
 @(private = "file")
@@ -1522,6 +1540,62 @@ _collection_name :: proc "contextless" (entry: string) -> string {
 		return entry[:eq]
 	}
 	return entry
+}
+
+/*
+Appends user compiler flags (`--no-bounds-check`, `--microarch`, `--collection`, `--ols`,
+`--define`, `--extra-linker-flags`, `--custom-attribute`) to an `odin build` command and
+returns any `name=path` collection entries added from `ols.json` together with its path.
+*/
+append_compiler_flags :: proc(
+	cmd: ^[dynamic]string,
+	pkg_dir: string,
+	opts: CLI_Options,
+	allocator := context.temp_allocator,
+) -> (
+	ols_added: [dynamic]string,
+	ols_path: string,
+) {
+	if opts.no_bounds_check {
+		append(cmd, "-no-bounds-check")
+	}
+	if opts.microarch != "" {
+		append(cmd, fmt.aprintf("-microarch:%s", opts.microarch, allocator = allocator))
+	}
+	seen_collections := make(map[string]bool, context.temp_allocator)
+	seen_collections[TARGET_COLLECTION] = true
+	seen_collections[LIB_COLLECTION] = true
+	seen_collections["core"] = true
+	seen_collections["base"] = true
+	seen_collections["vendor"] = true
+	for col in opts.collections {
+		append(cmd, fmt.aprintf("-collection:%s", col, allocator = allocator))
+		seen_collections[_collection_name(col)] = true
+	}
+	ols_added = make([dynamic]string, allocator)
+	if opts.ols {
+		ols_cols: [dynamic]string
+		ols_cols, ols_path = discover_ols_collections(pkg_dir, allocator)
+		for col in ols_cols {
+			name := _collection_name(col)
+			if name not_in seen_collections {
+				append(cmd, fmt.aprintf("-collection:%s", col, allocator = allocator))
+				append(&ols_added, col)
+				seen_collections[name] = true
+			}
+		}
+	}
+	for def in opts.defines {
+		append(cmd, fmt.aprintf("-define:%s", def, allocator = allocator))
+	}
+	if len(opts.extra_linker_flags) > 0 {
+		joined := strings.join(opts.extra_linker_flags[:], " ", context.temp_allocator)
+		append(cmd, fmt.aprintf("-extra-linker-flags:%s", joined, allocator = allocator))
+	}
+	for ca in opts.custom_attributes {
+		append(cmd, fmt.aprintf("-custom-attribute:%s", ca, allocator = allocator))
+	}
+	return ols_added, ols_path
 }
 
 /*
@@ -1540,6 +1614,7 @@ run_package :: proc(
 	work_dir: string,
 	opts: CLI_Options,
 	outputs: Package_Outputs,
+	reported_ols: ^map[string]bool = nil,
 ) -> bool {
 	exe_name := fmt.tprintf("bench_%d", index)
 	when ODIN_OS == .Windows {
@@ -1581,37 +1656,23 @@ run_package :: proc(
 	}
 
 	append(&cmd, fmt.tprintf("-out:%s", exe_path), fmt.tprintf("-o:%s", opts.opt_mode))
-	if opts.no_bounds_check {
-		append(&cmd, "-no-bounds-check")
-	}
-	if opts.microarch != "" {
-		append(&cmd, fmt.tprintf("-microarch:%s", opts.microarch))
-	}
-	seen_collections := make(map[string]bool, context.temp_allocator)
-	seen_collections[TARGET_COLLECTION] = true
-	seen_collections[LIB_COLLECTION] = true
-	seen_collections["core"] = true
-	seen_collections["base"] = true
-	seen_collections["vendor"] = true
-	for col in opts.collections {
-		append(&cmd, fmt.tprintf("-collection:%s", col))
-		seen_collections[_collection_name(col)] = true
-	}
-	for col in discover_ols_collections(pkg.dir_path) {
-		name := _collection_name(col)
-		if name not_in seen_collections {
-			append(&cmd, fmt.tprintf("-collection:%s", col))
-			seen_collections[name] = true
+	ols_added, ols_path := append_compiler_flags(&cmd, pkg.dir_path, opts)
+	if len(ols_added) > 0 && (reported_ols == nil || ols_path not_in reported_ols^) {
+		if reported_ols != nil {
+			reported_ols^[ols_path] = true
 		}
-	}
-	for def in opts.defines {
-		append(&cmd, fmt.tprintf("-define:%s", def))
-	}
-	for ef in opts.extra_linker_flags {
-		append(&cmd, fmt.tprintf("-extra-linker-flags:%s", ef))
-	}
-	for ca in opts.custom_attributes {
-		append(&cmd, fmt.tprintf("-custom-attribute:%s", ca))
+		shown_ols := ols_path
+		if cwd, cwd_err := os.get_working_directory(context.temp_allocator); cwd_err == nil {
+			if rel, rel_err := filepath.rel(cwd, ols_path, context.temp_allocator);
+			   rel_err == nil && !strings.has_prefix(rel, "..") {
+				shown_ols = rel
+			}
+		}
+		fmt.eprintfln(
+			"obench: %s: added -collection:%s",
+			shown_ols,
+			strings.join(ols_added[:], " -collection:", context.temp_allocator),
+		)
 	}
 
 	if !_run_process(cmd[:]) {
@@ -1758,6 +1819,7 @@ run_all :: proc(packages: []Discovered_Package, opts: CLI_Options) -> bool {
 	md_parts := make([dynamic]string, context.temp_allocator)
 	csv_parts := make([dynamic]string, context.temp_allocator)
 	used_spall_names := make(map[string]bool, context.temp_allocator)
+	reported_ols := make(map[string]bool, context.temp_allocator)
 	names := suite_names(packages, opts.target_path)
 
 	all_ok := true
@@ -1809,7 +1871,7 @@ run_all :: proc(packages: []Discovered_Package, opts: CLI_Options) -> bool {
 			continue
 		}
 
-		if !run_package(pkg, idx, names[idx], work_dir, opts, outputs) {
+		if !run_package(pkg, idx, names[idx], work_dir, opts, outputs, &reported_ols) {
 			all_ok = false
 		}
 		if multi {
