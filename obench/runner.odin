@@ -141,6 +141,29 @@ _fail_entry :: proc(s: ^Suite, result: ^Result, err: Bench_Error) -> Result {
 }
 
 @(private = "file")
+_store_batch_custom_metrics :: proc(
+	dst: ^[MAX_CUSTOM_METRICS]Custom_Metric,
+	dst_count: ^int,
+	br: ^_Batch_Result,
+	allocator: runtime.Allocator,
+) {
+	if br.custom_metrics_count <= 0 {
+		return
+	}
+	for j in 0 ..< dst_count^ {
+		delete(dst[j].unit, allocator)
+	}
+	dst_count^ = br.custom_metrics_count
+	for j in 0 ..< dst_count^ {
+		unit := string(br.metric_units[j][:br.metric_unit_lens[j]])
+		dst[j] = Custom_Metric {
+			unit  = strings.clone(unit, allocator),
+			value = br.metric_values[j],
+		}
+	}
+}
+
+@(private = "file")
 _execute_entry :: proc(
 	s: ^Suite,
 	group_name: string,
@@ -295,24 +318,15 @@ _execute_entry :: proc(
 	sampling_start := time.tick_now()
 	for i := 0; i < sample_target; i += 1 {
 		// Peak live bytes are tracked per sample.
-		intrinsics.atomic_store_explicit(&heap_counter.current_bytes, 0, .Relaxed)
+		if !cfg.untimed_alloc_check {
+			intrinsics.atomic_store_explicit(&heap_counter.current_bytes, 0, .Relaxed)
+		}
 		spall_begin(spall_rec, "sample", batch_arg)
-		br := _run_batch(&info, batch_size, &heap_counter, &temp_counter)
+		br :=
+			_run_batch(&info, batch_size, nil, nil) if cfg.untimed_alloc_check else _run_batch(&info, batch_size, &heap_counter, &temp_counter)
 		spall_end(spall_rec)
 
-		if br.custom_metrics_count > 0 {
-			for j in 0 ..< last_custom_count {
-				delete(last_custom[j].unit, s.allocator)
-			}
-			last_custom_count = br.custom_metrics_count
-			for j in 0 ..< last_custom_count {
-				unit := string(br.metric_units[j][:br.metric_unit_lens[j]])
-				last_custom[j] = Custom_Metric {
-					unit  = strings.clone(unit, s.allocator),
-					value = br.metric_values[j],
-				}
-			}
-		}
+		_store_batch_custom_metrics(&last_custom, &last_custom_count, &br, s.allocator)
 		if cfg.reset_temp_per_iter {
 			runtime.arena_free_all(temp_arena)
 		}
@@ -340,6 +354,23 @@ _execute_entry :: proc(
 		}
 	}
 
+	alloc_iters := total_iters
+	if cfg.untimed_alloc_check {
+		intrinsics.atomic_store_explicit(&heap_counter.current_bytes, 0, .Relaxed)
+		spall_begin(spall_rec, "alloc check", batch_arg)
+		abr := _run_batch(&info, batch_size, &heap_counter, &temp_counter)
+		spall_end(spall_rec)
+		_store_batch_custom_metrics(&last_custom, &last_custom_count, &abr, s.allocator)
+		if cfg.reset_temp_per_iter {
+			runtime.arena_free_all(temp_arena)
+		}
+		if abr.error != .None {
+			return _fail_entry(s, &result, abr.error)
+		}
+		expect_zero = expect_zero || abr.expect_zero
+		alloc_iters = u64(batch_size)
+	}
+
 	st := compute_stats(
 		ns_samples[:],
 		cyc_samples[:],
@@ -351,6 +382,7 @@ _execute_entry :: proc(
 		&temp_counter,
 		last_custom[:last_custom_count],
 		s.allocator,
+		alloc_iters,
 	)
 	st.samples_ns = slice.clone(ns_samples[:], s.allocator)
 	last_custom_count = 0 // Ownership of the unit strings moves to the result.
