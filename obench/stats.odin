@@ -80,6 +80,7 @@ Stats :: struct {
 	// each `Result`, and `load_baseline_file` allocates one per entry. Empty for reports
 	// written before format version 3.
 	samples_ns:           []f64,
+	samples_batch_ns:     []u64,
 }
 
 /*

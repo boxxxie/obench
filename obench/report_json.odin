@@ -52,6 +52,7 @@ Export_Entry :: struct {
 	temp_bytes_per_op:  f64 `json:"temp_bytes_per_op"`,
 	custom_metrics:     []Custom_Metric `json:"custom_metrics,omitempty"`,
 	samples_ns:         []f64 `json:"samples_ns,omitempty"`,
+	samples_batch_ns:   []u64 `json:"samples_batch_ns,omitempty"`,
 }
 
 /*
@@ -129,6 +130,7 @@ export_document :: proc(
 			temp_bytes_per_op  = r.stats.temp_bytes_per_op,
 			custom_metrics     = r.stats.custom_metrics[:r.stats.custom_metrics_count],
 			samples_ns         = r.stats.samples_ns,
+			samples_batch_ns   = r.stats.samples_batch_ns,
 		}
 	}
 
@@ -244,6 +246,7 @@ _export_entry_stats :: proc(e: Export_Entry) -> Stats {
 		temp_allocs_per_op = e.temp_allocs_per_op,
 		temp_bytes_per_op  = e.temp_bytes_per_op,
 		samples_ns         = e.samples_ns,
+		samples_batch_ns   = e.samples_batch_ns,
 	}
 	cm_count := min(len(e.custom_metrics), MAX_CUSTOM_METRICS)
 	st.custom_metrics_count = cm_count
@@ -338,11 +341,13 @@ _fill_baseline_map :: proc(
 		}
 		st := _export_entry_stats(e)
 		st.samples_ns = slice.clone(e.samples_ns, allocator)
+		st.samples_batch_ns = slice.clone(e.samples_batch_ns, allocator)
 		for i in 0 ..< st.custom_metrics_count {
 			st.custom_metrics[i].unit = strings.clone(st.custom_metrics[i].unit, allocator)
 		}
 		if old, found := out_map[e.full_name]; found {
 			delete(old.samples_ns, allocator)
+			delete(old.samples_batch_ns, allocator)
 			for i in 0 ..< old.custom_metrics_count {
 				delete(old.custom_metrics[i].unit, allocator)
 			}
@@ -361,6 +366,7 @@ destroy_baseline_map :: proc(m: ^map[string]Stats, allocator: runtime.Allocator)
 	for k, st in m^ {
 		delete(k, allocator)
 		delete(st.samples_ns, allocator)
+		delete(st.samples_batch_ns, allocator)
 		for i in 0 ..< st.custom_metrics_count {
 			delete(st.custom_metrics[i].unit, allocator)
 		}

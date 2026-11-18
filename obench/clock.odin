@@ -55,6 +55,7 @@ Timestamp :: struct {
 // Calibrated properties of the benchmark clock.
 Clock_Calibration :: struct {
 	overhead_ns:       f64, // Cost of one timed window (two back-to-back `clock_now` calls).
+	overhead_fs:       i64, // Cost of one timed window in femtoseconds (1e-6 ns).
 	overhead_cycles:   f64, // Same as `overhead_ns`, in cycles. 0 without a cycle counter.
 	resolution_ns:     f64, // Smallest observed non-zero tick difference.
 	has_cycle_counter: bool, // Mirrors `CYCLE_COUNTER_SUPPORTED`.
@@ -103,6 +104,7 @@ clock_calibrate :: proc "contextless" () -> Clock_Calibration {
 	BLOCKS :: 16
 	WINDOWS_PER_BLOCK :: 256
 	best_ns := max(f64)
+	best_sum_ns := max(i64)
 	best_cycles := max(f64)
 
 	for _ in 0 ..< BLOCKS {
@@ -116,6 +118,7 @@ clock_calibrate :: proc "contextless" () -> Clock_Calibration {
 			sum_ns += ns
 			sum_cycles += cyc
 		}
+		best_sum_ns = min(best_sum_ns, sum_ns)
 		best_ns = min(best_ns, f64(sum_ns) / WINDOWS_PER_BLOCK)
 		best_cycles = min(best_cycles, f64(sum_cycles) / WINDOWS_PER_BLOCK)
 	}
@@ -141,6 +144,10 @@ clock_calibrate :: proc "contextless" () -> Clock_Calibration {
 
 	return Clock_Calibration {
 		overhead_ns = best_ns,
+		overhead_fs = i64(
+			(i128(best_sum_ns) * 1_000_000 + i128(WINDOWS_PER_BLOCK / 2)) /
+			i128(WINDOWS_PER_BLOCK),
+		),
 		overhead_cycles = best_cycles,
 		resolution_ns = f64(min_step),
 		has_cycle_counter = CYCLE_COUNTER_SUPPORTED,
