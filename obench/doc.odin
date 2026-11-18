@@ -136,7 +136,8 @@ A program can also run benchmarks from its own `main`. `suite_create` reads the 
 environment variables and the command-line flags, so a program like this accepts
 `--filter`, `--json`, and the rest. `suite_run` returns `false` when a benchmark misused the
 API, a `@zero_alloc` check or a regression gate failed, or a report file couldn't be read or
-written. examples/lookup in the repository is a full program.
+written. For programmatic callers that render their own output, `suite_execute` runs the suite
+and writes any configured report files without printing to stdout. examples/lookup in the repository is a full program.
 
 	main :: proc() {
 		s := obench.suite_create("lookup")
