@@ -461,6 +461,27 @@ _compute_speedups :: proc(results: []Result) {
 }
 
 /*
+Runs all matching benchmarks in the suite, computes cohort speedups and Big-O complexity, and
+writes the configured JSON/Markdown/CSV/baseline/Spall files without printing to stdout.
+
+obench's own temporary allocations go to a private arena, so a run does not grow the
+caller's `context.temp_allocator`.
+
+Returns `true` when every benchmark ran correctly, every `@zero_alloc` assertion and
+`fail_on_regression` gate passed, and every requested file was read or written.
+*/
+@(require_results)
+suite_execute :: proc(s: ^Suite) -> bool {
+	scratch := runtime.Arena {
+		backing_allocator = s.allocator,
+	}
+	defer runtime.arena_destroy(&scratch)
+	context.temp_allocator = runtime.arena_allocator(&scratch)
+
+	return _suite_execute(s)
+}
+
+/*
 Runs all matching benchmarks in the suite, computes cohort speedups and Big-O complexity,
 writes the configured JSON/Markdown/CSV/baseline/Spall files, and prints the terminal report.
 
