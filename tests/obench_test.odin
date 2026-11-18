@@ -1405,3 +1405,18 @@ test_untimed_alloc_check_matches_alloc_metrics_and_zero_alloc :: proc(t: ^testin
 	testing.expect_value(t, st_untimed.allocs_per_op, 2.0)
 	testing.expect_value(t, st_untimed.alloc_bytes_per_op, 32.0)
 }
+
+@(test)
+test_clock_calibration_uses_low_overhead_monotonic :: proc(t: ^testing.T) {
+	cal := obench.clock_calibrate()
+	testing.expect(t, cal.overhead_ns >= 0)
+	testing.expect(t, cal.resolution_ns > 0)
+	when ODIN_OS == .Linux {
+		testing.expectf(
+			t,
+			cal.overhead_ns > 0 && cal.overhead_ns < 10_000.0,
+			"expected monotonic clock overhead in (0, 10000) ns, got %.1f ns",
+			cal.overhead_ns,
+		)
+	}
+}

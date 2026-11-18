@@ -3,6 +3,13 @@ package obench
 import "base:intrinsics"
 import "core:time"
 
+when ODIN_OS != .Linux {
+	@(private = "file", require_results)
+	_monotonic_tick :: #force_inline proc "contextless" () -> time.Tick {
+		return time.tick_now()
+	}
+}
+
 /*
 `true` when `intrinsics.read_cycle_counter` reads a CPU cycle counter (the x86 time-stamp
 counter, which ticks at the nominal reference frequency).
@@ -31,9 +38,9 @@ Clock_Calibration :: struct {
 @(require_results)
 clock_now :: #force_inline proc "contextless" () -> Timestamp {
 	when CYCLE_COUNTER_SUPPORTED {
-		return Timestamp{tick = time.tick_now(), cycles = u64(intrinsics.read_cycle_counter())}
+		return Timestamp{tick = _monotonic_tick(), cycles = u64(intrinsics.read_cycle_counter())}
 	} else {
-		return Timestamp{tick = time.tick_now()}
+		return Timestamp{tick = _monotonic_tick()}
 	}
 }
 
@@ -90,9 +97,9 @@ clock_calibrate :: proc "contextless" () -> Clock_Calibration {
 	// Resolution: the smallest non-zero step of the monotonic clock.
 	min_step: i64 = max(i64)
 	for _ in 0 ..< 32 {
-		start := time.tick_now()
+		start := _monotonic_tick()
 		for spin := 0; spin < 1_000_000; spin += 1 {
-			now := time.tick_now()
+			now := _monotonic_tick()
 			diff := i64(time.tick_diff(start, now))
 			if diff > 0 {
 				if diff < min_step {
