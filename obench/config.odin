@@ -19,6 +19,7 @@ Config :: struct {
 	fixed_batch_size:     int, // 0 = auto-calibrate
 	reset_temp_per_iter:  bool, // Default: true (frees the benchmark's private temp arena after every sample batch)
 	enforce_zero_allocs:  bool, // Fail if heap allocations > 0 inside measured loop
+	untimed_alloc_check:  bool, // Default: DEFAULT_UNTIMED_ALLOCS (count allocations and check @zero_alloc in one untimed batch after sampling)
 	fail_on_regression:   bool, // Fail suite if any benchmark regresses beyond noise_threshold_pct
 	filter:               string, // Substring filter on the full benchmark name
 	noise_threshold_pct:  f64, // Default: 2.0%
@@ -53,6 +54,7 @@ default_config :: proc() -> Config {
 		fixed_batch_size    = 0,
 		reset_temp_per_iter = true,
 		enforce_zero_allocs = DEFAULT_ZERO_ALLOC,
+		untimed_alloc_check = DEFAULT_UNTIMED_ALLOCS,
 		fail_on_regression  = false,
 		filter              = "",
 		noise_threshold_pct = 2.0,
@@ -77,6 +79,10 @@ default_config :: proc() -> Config {
 	if val := os.get_env("OBENCH_ZERO_ALLOC", context.temp_allocator);
 	   val == "1" || val == "true" {
 		cfg.enforce_zero_allocs = true
+	}
+	if val := os.get_env("OBENCH_UNTIMED_ALLOCS", context.temp_allocator);
+	   val == "1" || val == "true" {
+		cfg.untimed_alloc_check = true
 	}
 	if val := os.get_env("OBENCH_FAIL_ON_REGRESSION", context.temp_allocator);
 	   val == "1" || val == "true" {
@@ -123,7 +129,8 @@ default_config :: proc() -> Config {
 /*
 Applies obench command-line flags (`--filter`, `--samples`, `--warmup`, `--threshold`,
 `--baseline`, `--match-baseline-suite`, `--save-baseline`, `--json`, `--md`, `--csv`,
-`--spall`, `--zero-alloc`, `--fail-on-regression`, `--no-color`, `--no-histogram`) to `cfg`.
+`--spall`, `--zero-alloc`, `--untimed-allocs`, `--fail-on-regression`, `--no-color`,
+`--no-histogram`) to `cfg`.
 
 Values may be given as `--flag value`, `--flag=value`, or `-flag:value`. Unknown arguments
 are ignored so programs can mix obench flags with their own. String values point into
@@ -140,6 +147,9 @@ apply_args :: proc(cfg: ^Config, args: []string) {
 		switch arg {
 		case "--zero-alloc", "-zero-alloc":
 			cfg.enforce_zero_allocs = true
+			continue
+		case "--untimed-allocs", "-untimed-allocs":
+			cfg.untimed_alloc_check = true
 			continue
 		case "--fail-on-regression", "-fail-on-regression":
 			cfg.fail_on_regression = true

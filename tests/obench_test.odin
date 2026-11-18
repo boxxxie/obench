@@ -2,7 +2,6 @@ package obench_tests
 
 import obench "../obench"
 import "base:intrinsics"
-@(require) import "core:c"
 import "core:fmt"
 import "core:math"
 import "core:os"
@@ -422,6 +421,7 @@ test_apply_args :: proc(t: ^testing.T) {
 			"--warmup",
 			"3",
 			"--zero-alloc",
+			"--untimed-allocs",
 			"--json",
 			"out.json",
 			"--no-histogram",
@@ -431,6 +431,7 @@ test_apply_args :: proc(t: ^testing.T) {
 	testing.expect_value(t, cfg.sample_count, 7)
 	testing.expect_value(t, cfg.warmup_time, 3 * time.Millisecond)
 	testing.expect_value(t, cfg.enforce_zero_allocs, true)
+	testing.expect_value(t, cfg.untimed_alloc_check, true)
 	testing.expect_value(t, cfg.json_export_path, "out.json")
 	testing.expect_value(t, cfg.show_histogram, false)
 }
@@ -1273,12 +1274,144 @@ test_csv_keeps_precision_and_leaves_unset_columns_empty :: proc(t: ^testing.T) {
 	testing.expect_value(t, p50, s.results[0].stats.p50_ns)
 }
 
+@(private = "file")
+_metric_step :: proc(b: ^obench.Bencher) {
+	obench.report_metric(b, 42.5, "hit%")
+	for obench.step(b) {
+		_ = obench.black_box(1)
+	}
+}
+
+@(test)
+test_suite_execute_and_baseline_custom_metrics_roundtrip :: proc(t: ^testing.T) {
+	path := ".obench_test_custom_metrics_baseline.json"
+	defer _ = os.remove(path)
+
+	cfg := quick_config()
+	cfg.baseline_save_path = path
+	s := obench.suite_create("silent_exec", cfg)
+	defer obench.suite_destroy(&s)
+	obench.bench(&s, "metric_bench", _metric_step)
+
+	testing.expect(t, obench.suite_execute(&s))
+	testing.expect_value(t, len(s.results), 1)
+	testing.expect_value(t, s.results[0].stats.custom_metrics_count, 1)
+
+	loaded := make(map[string]obench.Stats)
+	defer obench.destroy_baseline_map(&loaded, context.allocator)
+	err := obench.load_baseline_file(path, &loaded, context.allocator)
+	testing.expect_value(t, err, nil)
+
+	st, ok := loaded["metric_bench"]
+	testing.expect(t, ok)
+	testing.expect_value(t, st.custom_metrics_count, 1)
+	if st.custom_metrics_count == 1 {
+		testing.expect_value(t, st.custom_metrics[0].unit, "hit%")
+		testing.expect_value(t, st.custom_metrics[0].value, 42.5)
+	}
+
+	cfg2 := quick_config()
+	cfg2.baseline_load_path = path
+	s2 := obench.suite_create("silent_exec_load", cfg2)
+	defer obench.suite_destroy(&s2)
+	obench.bench(&s2, "metric_bench", _metric_step)
+
+	testing.expect(t, obench.suite_execute(&s2))
+	testing.expect_value(t, len(s2.results), 1)
+	testing.expect(t, s2.results[0].diff.has_baseline)
+
+	temp_counter: obench.Counting_Allocator
+	obench.counting_allocator_init(&temp_counter, context.temp_allocator)
+	{
+		context.temp_allocator = obench.counting_allocator(&temp_counter)
+		testing.expect(t, obench.suite_run(&s2))
+	}
+	testing.expect_value(t, temp_counter.alloc_count, u64(0))
+	testing.expect_value(t, temp_counter.resize_count, u64(0))
+}
+
+@(private = "file")
+_alloc_and_temp_and_resize :: proc(b: ^obench.Bencher) {
+	for obench.step(b) {
+		arr := make([dynamic]int, 0, 2)
+		for i in 0 ..< 5 {
+			append(&arr, i)
+		}
+		obench.keep_alive(&arr)
+		delete(arr)
+
+		tmp := make([]u8, 32, context.temp_allocator)
+		obench.keep_alive(&tmp)
+	}
+}
+
+@(test)
+test_untimed_alloc_check_matches_alloc_metrics_and_zero_alloc :: proc(t: ^testing.T) {
+	cfg_timed := quick_config()
+	cfg_timed.untimed_alloc_check = false
+	s_timed := obench.suite_create("timed_allocs", cfg_timed)
+	defer obench.suite_destroy(&s_timed)
+	obench.bench(&s_timed, "work", _alloc_and_temp_and_resize)
+	obench.bench(&s_timed, "free_peak", _new_and_free_previous)
+	testing.expect(t, obench.suite_run(&s_timed))
+
+	cfg_untimed := quick_config()
+	cfg_untimed.untimed_alloc_check = true
+	s_untimed := obench.suite_create("untimed_allocs", cfg_untimed)
+	defer obench.suite_destroy(&s_untimed)
+	obench.bench(&s_untimed, "work", _alloc_and_temp_and_resize)
+	obench.bench(&s_untimed, "free_peak", _new_and_free_previous)
+	testing.expect(t, obench.suite_run(&s_untimed))
+
+	a := s_timed.results[0].stats
+	b := s_untimed.results[0].stats
+	testing.expect_value(t, b.allocs_per_op, a.allocs_per_op)
+	testing.expect_value(t, b.resizes_per_op, a.resizes_per_op)
+	testing.expect_value(t, b.alloc_bytes_per_op, a.alloc_bytes_per_op)
+	testing.expect_value(t, b.temp_allocs_per_op, a.temp_allocs_per_op)
+	testing.expect_value(t, b.temp_bytes_per_op, a.temp_bytes_per_op)
+	testing.expect_value(t, s_untimed.results[1].stats.peak_heap_bytes, i64(128))
+
+	cfg_zero := quick_config()
+	cfg_zero.untimed_alloc_check = true
+	s_zero := obench.suite_create("untimed_zero_alloc", cfg_zero)
+	defer obench.suite_destroy(&s_zero)
+	obench.bench(&s_zero, "late", _allocs_then_expects_zero)
+	testing.expect(t, !obench.suite_run(&s_zero))
+	testing.expect(t, s_zero.results[0].zero_alloc_failed)
+	testing.expect_value(t, s_zero.results[0].violation_size, 24)
+	testing.expect(t, s_zero.results[0].violation_loc.line > 0)
+
+	hc: obench.Counting_Allocator
+	obench.counting_allocator_init(&hc, context.allocator)
+	hc.alloc_count = 6
+	hc.bytes_allocated = 96
+	samples := []f64{10.0, 12.0}
+	st_pos := obench.compute_stats(samples, samples, 3, 6, 0, 0, &hc, nil, nil, context.allocator)
+	testing.expect_value(t, st_pos.allocs_per_op, 1.0)
+	st_untimed := obench.compute_stats(
+		samples,
+		samples,
+		3,
+		6,
+		0,
+		0,
+		&hc,
+		nil,
+		nil,
+		context.allocator,
+		3,
+	)
+	testing.expect_value(t, st_untimed.allocs_per_op, 2.0)
+	testing.expect_value(t, st_untimed.alloc_bytes_per_op, 32.0)
+}
+
 @(test)
 test_clock_calibration_uses_low_overhead_monotonic :: proc(t: ^testing.T) {
 	cal := obench.clock_calibrate()
 	testing.expect(t, cal.overhead_ns >= 0)
 	testing.expect(t, cal.resolution_ns > 0)
-	when ODIN_OS == .Linux && size_of(c.long) == 8 {
+	when ODIN_OS == .Linux {
 		testing.expectf(
 			t,
 			cal.overhead_ns > 0 && cal.overhead_ns < 10_000.0,
