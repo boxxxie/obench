@@ -1,35 +1,9 @@
 package obench
 
 import "base:intrinsics"
-@(require) import "core:c"
 import "core:time"
 
-when ODIN_OS == .Linux && size_of(c.long) == 8 {
-	foreign import libc "system:c"
-
-	@(private = "file")
-	_CLOCK_MONOTONIC :: c.int(1)
-
-	@(private = "file")
-	_Timespec :: struct {
-		tv_sec:  c.long,
-		tv_nsec: c.long,
-	}
-
-	@(private = "file", default_calling_convention = "c")
-	foreign libc {
-		clock_gettime :: proc(clk_id: c.int, tp: ^_Timespec) -> c.int ---
-	}
-
-	// Userspace vDSO clock read (~14 ns vs kernel syscall overhead in `core:time.tick_now`).
-	@(private = "file", require_results)
-	_monotonic_tick :: #force_inline proc "contextless" () -> time.Tick {
-		ts: _Timespec
-		_ = clock_gettime(_CLOCK_MONOTONIC, &ts)
-		ns := i64(ts.tv_sec) * 1_000_000_000 + i64(ts.tv_nsec)
-		return time.tick_add(time.Tick{}, time.Duration(ns))
-	}
-} else {
+when ODIN_OS != .Linux {
 	@(private = "file", require_results)
 	_monotonic_tick :: #force_inline proc "contextless" () -> time.Tick {
 		return time.tick_now()

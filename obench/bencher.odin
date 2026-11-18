@@ -85,7 +85,7 @@ Drives the calibrated hot loop inside a benchmark procedure:
 Do not leave the loop with `break` or `return`; obench reports that as `.Loop_Exited_Early`.
 */
 @(require_results)
-step :: #force_inline proc(#no_alias b: ^Bencher) -> bool {
+step :: #force_inline proc(b: ^Bencher) -> bool {
 	if !b._started_sample {
 		b._started_sample = true
 		b._windows += 1
