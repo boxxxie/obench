@@ -3,6 +3,7 @@ package main
 import "core:fmt"
 import "core:os"
 import "core:path/filepath"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 
@@ -635,4 +636,100 @@ test_discover_skips_vendored_checkout :: proc(t: ^testing.T) {
 	if len(names) == 1 {
 		testing.expect_value(t, names[0], "demo_bench")
 	}
+}
+
+@(test)
+test_parse_cli_extra_compiler_flags :: proc(t: ^testing.T) {
+	opts, err := parse_cli_args(
+		{
+			"run",
+			"examples",
+			"--extra-linker-flags",
+			"-lm",
+			"--extra-linker-flags",
+			"-lc",
+			"--custom-attribute",
+			"telemetry_schema",
+			"--ols",
+		},
+	)
+	defer destroy_cli_options(&opts)
+	testing.expect_value(t, err, "")
+	testing.expect_value(t, opts.ols, true)
+	testing.expect_value(t, len(opts.extra_linker_flags), 2)
+	testing.expect_value(t, len(opts.custom_attributes), 1)
+	testing.expect_value(t, opts.custom_attributes[0], "telemetry_schema")
+
+	cmd := make([dynamic]string, context.temp_allocator)
+	append_compiler_flags(&cmd, "examples/sorting", opts)
+	testing.expect(t, slice.contains(cmd[:], "-extra-linker-flags:-lm -lc"))
+	testing.expect(t, slice.contains(cmd[:], "-custom-attribute:telemetry_schema"))
+}
+
+@(test)
+test_discover_ols_collections :: proc(t: ^testing.T) {
+	root, err := os.make_directory_temp("", "obench-ols-test-*", context.temp_allocator)
+	if !testing.expect_value(t, err, nil) {
+		return
+	}
+	defer os.remove_all(root)
+
+	abs_root, abs_err := os.get_absolute_path(root, context.temp_allocator)
+	if !testing.expect_value(t, abs_err, nil) {
+		return
+	}
+
+	_write_test_file(
+		t,
+		abs_root,
+		".",
+		"ols.json",
+		`{"collections":[{"name":"core","path":"/usr/lib/odin/core"},{"name":"mimir","path":"./mimir"},{"name":"xitdb","path":"./deps/xitdb"}]}`,
+	)
+	bench_dir, _ := filepath.join({abs_root, "benchmarks", "sub"}, context.temp_allocator)
+	_write_test_file(t, abs_root, "benchmarks/sub", "x_bench.odin", "package x_bench\n")
+
+	cols, ols_path := discover_ols_collections(bench_dir)
+	expected_ols, _ := filepath.join({abs_root, "ols.json"}, context.temp_allocator)
+	expected_mimir, _ := filepath.join({abs_root, "mimir"}, context.temp_allocator)
+	expected_xitdb, _ := filepath.join({abs_root, "deps", "xitdb"}, context.temp_allocator)
+	testing.expect_value(t, ols_path, expected_ols)
+	testing.expect_value(t, len(cols), 2)
+	if len(cols) == 2 {
+		testing.expect_value(t, cols[0], fmt.tprintf("mimir=%s", expected_mimir))
+		testing.expect_value(t, cols[1], fmt.tprintf("xitdb=%s", expected_xitdb))
+	}
+
+	opts_off, err_off := parse_cli_args({"run", "examples"})
+	defer destroy_cli_options(&opts_off)
+	testing.expect_value(t, err_off, "")
+	cmd_off := make([dynamic]string, context.temp_allocator)
+	added_off, _ := append_compiler_flags(&cmd_off, bench_dir, opts_off)
+	testing.expect_value(t, len(added_off), 0)
+
+	opts_on, err_on := parse_cli_args(
+		{"run", "examples", "--ols", "--collection", "mimir=/override"},
+	)
+	defer destroy_cli_options(&opts_on)
+	testing.expect_value(t, err_on, "")
+	cmd_on := make([dynamic]string, context.temp_allocator)
+	added_on, found_on := append_compiler_flags(&cmd_on, bench_dir, opts_on)
+	testing.expect_value(t, found_on, expected_ols)
+	testing.expect_value(t, len(added_on), 1)
+	if len(added_on) == 1 {
+		testing.expect_value(t, added_on[0], fmt.tprintf("xitdb=%s", expected_xitdb))
+	}
+	testing.expect(t, slice.contains(cmd_on[:], "-collection:mimir=/override"))
+	testing.expect(
+		t,
+		slice.contains(cmd_on[:], fmt.tprintf("-collection:xitdb=%s", expected_xitdb)),
+	)
+
+	nested_git, _ := filepath.join({abs_root, "nested_repo", ".git"}, context.temp_allocator)
+	nested_pkg, _ := filepath.join({abs_root, "nested_repo", "benches"}, context.temp_allocator)
+	_ = os.make_directory_all(nested_git)
+	_write_test_file(t, abs_root, "nested_repo/benches", "y_bench.odin", "package y_bench\n")
+	nested_cols, nested_ols := discover_ols_collections(nested_pkg)
+	testing.expect_value(t, nested_ols, "")
+	testing.expect_value(t, len(nested_cols), 0)
 }

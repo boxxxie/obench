@@ -144,6 +144,45 @@ set -e
 [ "$code" -eq 1 ] || fail "expected exit 1 for a build failure, got $code"
 [ ! -e "$WORK/stale_b.json" ] || fail "the old --json report was copied to --save-baseline"
 
+step "--ols adds collections from ols.json only when requested and prints them"
+mkdir -p "$WORK/ols_test/dep/helper" "$WORK/ols_test/bench"
+cat > "$WORK/ols_test/ols.json" <<'JSON'
+{"collections":[{"name":"dep","path":"./dep"}]}
+JSON
+cat > "$WORK/ols_test/dep/helper/helper.odin" <<'ODIN'
+package helper
+
+value :: proc() -> int { return 7 }
+ODIN
+cat > "$WORK/ols_test/bench/ols_bench.odin" <<'ODIN'
+package ols_bench
+
+import "dep:helper"
+import obench "libs:obench"
+
+@(custom_tag)
+bench_ols :: proc(b: ^obench.Bencher) {
+	for obench.step(b) {
+		_ = obench.black_box(helper.value())
+	}
+}
+ODIN
+set +e
+"$OBENCH" "$WORK_N/ols_test/bench" --collection "libs=$ROOT_N" --custom-attribute custom_tag \
+  -n 5 -w 2 --no-color >/dev/null 2>&1; code=$?
+set -e
+[ "$code" -eq 1 ] || fail "expected exit 1 without --ols when importing an ols.json collection, got $code"
+"$OBENCH" "$WORK_N/ols_test/bench" --collection "libs=$ROOT_N" --ols --custom-attribute custom_tag \
+  -n 5 -w 2 --no-color >/dev/null 2> "$WORK/ols_err.txt"
+grep -q "added -collection:dep=" "$WORK/ols_err.txt" || fail "expected --ols to print the added collection"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*|Windows_NT) ;;
+  *)
+    "$OBENCH" "$WORK_N/ols_test/bench" --collection "libs=$ROOT_N" --ols --custom-attribute custom_tag \
+      --extra-linker-flags -lm --extra-linker-flags -lm -n 5 -w 2 --no-color >/dev/null
+    ;;
+esac
+
 step "nothing was written into the source tree"
 AFTER="$(snapshot)"
 [ "$BEFORE" = "$AFTER" ] || fail "files under examples/ changed: $(diff <(echo "$BEFORE") <(echo "$AFTER") || true)"
