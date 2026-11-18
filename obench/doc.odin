@@ -228,6 +228,7 @@ pick up these environment variables. Command-line flags of the same name overrid
 	OBENCH_SAMPLES, OBENCH_WARMUP_MS Sample count and warmup
 	OBENCH_THRESHOLD                 Same as --threshold
 	OBENCH_ZERO_ALLOC                1 or true to enable
+	OBENCH_UNTIMED_ALLOCS            1 or true to measure allocations in one untimed batch
 	OBENCH_FAIL_ON_REGRESSION        1 or true to enable
 	OBENCH_BASELINE                  Baseline to compare against
 	OBENCH_SAVE_BASELINE             Where to save one
@@ -248,6 +249,8 @@ Compile-time defaults can be changed with `-define`:
 	DEFAULT_MAX_BENCH_MS  : int    : #config(OBENCH_MAX_BENCH_MS,  1200)
 	// Enforce zero heap allocations globally across all benchmarks.
 	DEFAULT_ZERO_ALLOC    : bool   : #config(OBENCH_ZERO_ALLOC,    false)
+	// Measure allocations in a single untimed pass after timed samples.
+	DEFAULT_UNTIMED_ALLOCS: bool   : #config(OBENCH_UNTIMED_ALLOCS, false)
 	// Enable ANSI color output in terminal reports.
 	DEFAULT_COLOR         : bool   : #config(OBENCH_COLOR,         true)
 	// Render 8-bin Unicode distribution sparklines in terminal reports.
@@ -333,6 +336,8 @@ DEFAULT_MIN_SAMPLE_US: int : #config(OBENCH_MIN_SAMPLE_US, 1000)
 DEFAULT_MAX_BENCH_MS: int : #config(OBENCH_MAX_BENCH_MS, 1200)
 // Enforce zero heap allocations globally across all benchmarks.
 DEFAULT_ZERO_ALLOC: bool : #config(OBENCH_ZERO_ALLOC, false)
+// Measure allocations in a single untimed pass after timed samples.
+DEFAULT_UNTIMED_ALLOCS: bool : #config(OBENCH_UNTIMED_ALLOCS, false)
 // Enable ANSI color output in terminal reports.
 DEFAULT_COLOR: bool : #config(OBENCH_COLOR, true)
 // Render 8-bin Unicode distribution sparklines in terminal reports.

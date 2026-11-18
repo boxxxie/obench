@@ -1271,3 +1271,56 @@ test_csv_keeps_precision_and_leaves_unset_columns_empty :: proc(t: ^testing.T) {
 	testing.expect(t, ok)
 	testing.expect_value(t, p50, s.results[0].stats.p50_ns)
 }
+
+@(private = "file")
+_alloc_and_temp_and_resize :: proc(b: ^obench.Bencher) {
+	for obench.step(b) {
+		arr := make([dynamic]int, 0, 2)
+		for i in 0 ..< 5 {
+			append(&arr, i)
+		}
+		obench.keep_alive(&arr)
+		delete(arr)
+
+		tmp := make([]u8, 32, context.temp_allocator)
+		obench.keep_alive(&tmp)
+	}
+}
+
+@(test)
+test_untimed_alloc_check_matches_alloc_metrics_and_zero_alloc :: proc(t: ^testing.T) {
+	cfg_timed := quick_config()
+	cfg_timed.untimed_alloc_check = false
+	s_timed := obench.suite_create("timed_allocs", cfg_timed)
+	defer obench.suite_destroy(&s_timed)
+	obench.bench(&s_timed, "work", _alloc_and_temp_and_resize)
+	obench.bench(&s_timed, "free_peak", _new_and_free_previous)
+	testing.expect(t, obench.suite_run(&s_timed))
+
+	cfg_untimed := quick_config()
+	cfg_untimed.untimed_alloc_check = true
+	s_untimed := obench.suite_create("untimed_allocs", cfg_untimed)
+	defer obench.suite_destroy(&s_untimed)
+	obench.bench(&s_untimed, "work", _alloc_and_temp_and_resize)
+	obench.bench(&s_untimed, "free_peak", _new_and_free_previous)
+	testing.expect(t, obench.suite_run(&s_untimed))
+
+	a := s_timed.results[0].stats
+	b := s_untimed.results[0].stats
+	testing.expect_value(t, b.allocs_per_op, a.allocs_per_op)
+	testing.expect_value(t, b.resizes_per_op, a.resizes_per_op)
+	testing.expect_value(t, b.alloc_bytes_per_op, a.alloc_bytes_per_op)
+	testing.expect_value(t, b.temp_allocs_per_op, a.temp_allocs_per_op)
+	testing.expect_value(t, b.temp_bytes_per_op, a.temp_bytes_per_op)
+	testing.expect_value(t, s_untimed.results[1].stats.peak_heap_bytes, i64(128))
+
+	cfg_zero := quick_config()
+	cfg_zero.untimed_alloc_check = true
+	s_zero := obench.suite_create("untimed_zero_alloc", cfg_zero)
+	defer obench.suite_destroy(&s_zero)
+	obench.bench(&s_zero, "late", _allocs_then_expects_zero)
+	testing.expect(t, !obench.suite_run(&s_zero))
+	testing.expect(t, s_zero.results[0].zero_alloc_failed)
+	testing.expect_value(t, s_zero.results[0].violation_size, 24)
+	testing.expect(t, s_zero.results[0].violation_loc.line > 0)
+}

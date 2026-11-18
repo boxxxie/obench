@@ -23,6 +23,7 @@ test_parse_cli_args_run_options :: proc(t: ^testing.T) {
 			"--collection",
 			"lib=./lib",
 			"--zero-alloc",
+			"--untimed-allocs",
 			"--json",
 			"out.json",
 		},
@@ -36,6 +37,7 @@ test_parse_cli_args_run_options :: proc(t: ^testing.T) {
 	testing.expect_value(t, opts.opt_mode, "aggressive")
 	testing.expect_value(t, len(opts.collections), 1)
 	testing.expect_value(t, opts.zero_alloc, true)
+	testing.expect_value(t, opts.untimed_allocs, true)
 	testing.expect_value(t, opts.json_path, "out.json")
 }
 
