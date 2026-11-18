@@ -1,7 +1,40 @@
 package obench
 
 import "base:intrinsics"
+@(require) import "core:c"
 import "core:time"
+
+when ODIN_OS == .Linux && size_of(c.long) == 8 {
+	foreign import libc "system:c"
+
+	@(private = "file")
+	_CLOCK_MONOTONIC :: c.int(1)
+
+	@(private = "file")
+	_Timespec :: struct {
+		tv_sec:  c.long,
+		tv_nsec: c.long,
+	}
+
+	@(private = "file", default_calling_convention = "c")
+	foreign libc {
+		clock_gettime :: proc(clk_id: c.int, tp: ^_Timespec) -> c.int ---
+	}
+
+	// Userspace vDSO clock read (~14 ns vs kernel syscall overhead in `core:time.tick_now`).
+	@(private = "file", require_results)
+	_monotonic_tick :: #force_inline proc "contextless" () -> time.Tick {
+		ts: _Timespec
+		_ = clock_gettime(_CLOCK_MONOTONIC, &ts)
+		ns := i64(ts.tv_sec) * 1_000_000_000 + i64(ts.tv_nsec)
+		return time.tick_add(time.Tick{}, time.Duration(ns))
+	}
+} else {
+	@(private = "file", require_results)
+	_monotonic_tick :: #force_inline proc "contextless" () -> time.Tick {
+		return time.tick_now()
+	}
+}
 
 /*
 `true` when `intrinsics.read_cycle_counter` reads a CPU cycle counter (the x86 time-stamp
@@ -31,9 +64,9 @@ Clock_Calibration :: struct {
 @(require_results)
 clock_now :: #force_inline proc "contextless" () -> Timestamp {
 	when CYCLE_COUNTER_SUPPORTED {
-		return Timestamp{tick = time.tick_now(), cycles = u64(intrinsics.read_cycle_counter())}
+		return Timestamp{tick = _monotonic_tick(), cycles = u64(intrinsics.read_cycle_counter())}
 	} else {
-		return Timestamp{tick = time.tick_now()}
+		return Timestamp{tick = _monotonic_tick()}
 	}
 }
 
@@ -90,9 +123,9 @@ clock_calibrate :: proc "contextless" () -> Clock_Calibration {
 	// Resolution: the smallest non-zero step of the monotonic clock.
 	min_step: i64 = max(i64)
 	for _ in 0 ..< 32 {
-		start := time.tick_now()
+		start := _monotonic_tick()
 		for spin := 0; spin < 1_000_000; spin += 1 {
-			now := time.tick_now()
+			now := _monotonic_tick()
 			diff := i64(time.tick_diff(start, now))
 			if diff > 0 {
 				if diff < min_step {
