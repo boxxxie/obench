@@ -1271,3 +1271,59 @@ test_csv_keeps_precision_and_leaves_unset_columns_empty :: proc(t: ^testing.T) {
 	testing.expect(t, ok)
 	testing.expect_value(t, p50, s.results[0].stats.p50_ns)
 }
+
+@(private = "file")
+_metric_step :: proc(b: ^obench.Bencher) {
+	obench.report_metric(b, 42.5, "hit%")
+	for obench.step(b) {
+		_ = obench.black_box(1)
+	}
+}
+
+@(test)
+test_suite_execute_and_baseline_custom_metrics_roundtrip :: proc(t: ^testing.T) {
+	path := ".obench_test_custom_metrics_baseline.json"
+	defer _ = os.remove(path)
+
+	cfg := quick_config()
+	cfg.baseline_save_path = path
+	s := obench.suite_create("silent_exec", cfg)
+	defer obench.suite_destroy(&s)
+	obench.bench(&s, "metric_bench", _metric_step)
+
+	testing.expect(t, obench.suite_execute(&s))
+	testing.expect_value(t, len(s.results), 1)
+	testing.expect_value(t, s.results[0].stats.custom_metrics_count, 1)
+
+	loaded := make(map[string]obench.Stats)
+	defer obench.destroy_baseline_map(&loaded, context.allocator)
+	err := obench.load_baseline_file(path, &loaded, context.allocator)
+	testing.expect_value(t, err, nil)
+
+	st, ok := loaded["metric_bench"]
+	testing.expect(t, ok)
+	testing.expect_value(t, st.custom_metrics_count, 1)
+	if st.custom_metrics_count == 1 {
+		testing.expect_value(t, st.custom_metrics[0].unit, "hit%")
+		testing.expect_value(t, st.custom_metrics[0].value, 42.5)
+	}
+
+	cfg2 := quick_config()
+	cfg2.baseline_load_path = path
+	s2 := obench.suite_create("silent_exec_load", cfg2)
+	defer obench.suite_destroy(&s2)
+	obench.bench(&s2, "metric_bench", _metric_step)
+
+	testing.expect(t, obench.suite_execute(&s2))
+	testing.expect_value(t, len(s2.results), 1)
+	testing.expect(t, s2.results[0].diff.has_baseline)
+
+	temp_counter: obench.Counting_Allocator
+	obench.counting_allocator_init(&temp_counter, context.temp_allocator)
+	{
+		context.temp_allocator = obench.counting_allocator(&temp_counter)
+		testing.expect(t, obench.suite_run(&s2))
+	}
+	testing.expect_value(t, temp_counter.alloc_count, u64(0))
+	testing.expect_value(t, temp_counter.resize_count, u64(0))
+}
