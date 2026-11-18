@@ -634,3 +634,24 @@ test_discover_skips_vendored_checkout :: proc(t: ^testing.T) {
 		testing.expect_value(t, names[0], "demo_bench")
 	}
 }
+
+@(test)
+test_discover_no_alias_bencher :: proc(t: ^testing.T) {
+	dir, ok := _write_temp_package(
+		t,
+		"noalias_bench.odin",
+		"package noalias_bench\n\nimport obench \"libs:obench\"\n\nbench_fast :: proc(#no_alias b: ^obench.Bencher) {}\n",
+	)
+	if !ok {
+		return
+	}
+	defer os.remove_all(dir)
+
+	pkg, status := discover_package(dir)
+	defer destroy_discovered_package(&pkg)
+	testing.expect_value(t, status, Discover_Status.Benchmark_Package)
+	testing.expect_value(t, len(pkg.benches), 1)
+	if len(pkg.benches) == 1 {
+		testing.expect_value(t, pkg.benches[0].proc_name, "bench_fast")
+	}
+}

@@ -2,6 +2,7 @@ package obench_tests
 
 import obench "../obench"
 import "base:intrinsics"
+@(require) import "core:c"
 import "core:fmt"
 import "core:math"
 import "core:os"
@@ -1270,4 +1271,19 @@ test_csv_keeps_precision_and_leaves_unset_columns_empty :: proc(t: ^testing.T) {
 	p50, ok := strconv.parse_f64(fields[10])
 	testing.expect(t, ok)
 	testing.expect_value(t, p50, s.results[0].stats.p50_ns)
+}
+
+@(test)
+test_clock_calibration_uses_low_overhead_monotonic :: proc(t: ^testing.T) {
+	cal := obench.clock_calibrate()
+	testing.expect(t, cal.overhead_ns >= 0)
+	testing.expect(t, cal.resolution_ns > 0)
+	when ODIN_OS == .Linux && size_of(c.long) == 8 {
+		testing.expectf(
+			t,
+			cal.overhead_ns > 0 && cal.overhead_ns < 10_000.0,
+			"expected monotonic clock overhead in (0, 10000) ns, got %.1f ns",
+			cal.overhead_ns,
+		)
+	}
 }
