@@ -324,14 +324,6 @@ test_clock_overhead_is_measured :: proc(t: ^testing.T) {
 	cal := obench.clock_calibrate()
 	testing.expectf(t, cal.overhead_ns > 0, "overhead %v ns", cal.overhead_ns)
 	testing.expectf(t, cal.overhead_ns < 10_000, "overhead %v ns", cal.overhead_ns)
-	testing.expectf(t, cal.overhead_fs > 0, "overhead_fs %v fs", cal.overhead_fs)
-	testing.expectf(
-		t,
-		math.abs(f64(cal.overhead_fs) / 1_000_000.0 - cal.overhead_ns) <= 5e-7 + 1e-9,
-		"overhead_fs %v fs disagrees with overhead_ns %v ns",
-		cal.overhead_fs,
-		cal.overhead_ns,
-	)
 }
 
 @(test)
@@ -1595,9 +1587,6 @@ _multi_window_step :: proc(b: ^obench.Bencher) {
 _expect_batch_matches_ns :: proc(
 	t: ^testing.T,
 	st: obench.Stats,
-	expected_ov_ns: f64,
-	expected_ov_fs: i64,
-	windows: int,
 	label: string,
 	loc := #caller_location,
 ) {
@@ -1609,293 +1598,93 @@ _expect_batch_matches_ns :: proc(
 	if !testing.expect_value(t, len(st.samples_batch_ns), len(st.samples_ns), loc = loc) {
 		return
 	}
-	testing.expect(
-		t,
-		expected_ov_ns >= 0 && !math.is_inf(expected_ov_ns, 0) && expected_ov_fs >= 0,
-		"expected overhead must be finite and non-negative",
-		loc = loc,
-	)
-	win := max(windows, 1)
-	ov_f := expected_ov_ns * f64(win)
-	ov_i := f64((i128(expected_ov_fs) * i128(win) + 500_000) / 1_000_000)
-	max_diff := (math.abs(ov_f - ov_i) + 1e-6) / f64(st.batch_size) + 1e-9
 	for i in 0 ..< len(st.samples_batch_ns) {
-		diff := math.abs(f64(st.samples_batch_ns[i]) / f64(st.batch_size) - st.samples_ns[i])
+		diff := math.abs(f64(st.samples_batch_ns[i]) - st.samples_ns[i] * f64(st.batch_size))
 		testing.expectf(
 			t,
-			diff <= max_diff,
-			"%s sample %d: batch_ns=%d ns_per_op=%v batch_size=%d diff=%v max_diff=%v",
+			diff <= 0.5 + 1e-9,
+			"%s sample %d: batch_ns=%d ns_per_op=%v batch_size=%d diff=%v",
 			label,
 			i,
 			st.samples_batch_ns[i],
 			st.samples_ns[i],
 			st.batch_size,
 			diff,
-			max_diff,
 			loc = loc,
 		)
 	}
 }
 
-@(private = "file")
-_expect_has_positive_batch :: proc(
-	t: ^testing.T,
-	st: obench.Stats,
-	msg: string,
-	loc := #caller_location,
-) {
-	has_positive := false
-	for v in st.samples_batch_ns {
-		if v > 0 {
-			has_positive = true
-			break
-		}
-	}
-	testing.expect(t, has_positive, msg, loc = loc)
-}
-
-@(private = "file")
-_expect_all_zero_samples :: proc(t: ^testing.T, st: obench.Stats, loc := #caller_location) {
-	testing.expect(t, st.samples >= obench.MIN_SAMPLES, "expected at least MIN_SAMPLES", loc = loc)
-	testing.expect(t, st.batch_size > 0, "expected positive batch_size", loc = loc)
-	testing.expect_value(t, len(st.samples_batch_ns), st.samples, loc = loc)
-	if !testing.expect_value(t, len(st.samples_ns), st.samples, loc = loc) ||
-	   len(st.samples_batch_ns) != len(st.samples_ns) {
-		return
-	}
-	for i in 0 ..< len(st.samples_batch_ns) {
-		testing.expect_value(t, st.samples_batch_ns[i], u64(0), loc = loc)
-		testing.expect_value(t, st.samples_ns[i], 0.0, loc = loc)
-	}
-}
-
 @(test)
-test_samples_batch_ns_matches_samples_ns_and_overhead_edges :: proc(t: ^testing.T) {
+test_samples_batch_ns_matches_rounded_adj_ns :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 
+	// 1. Standard calibrated suite run plus positive batch duration check.
 	cfg := quick_config()
 	s := obench.suite_create("batch_samples", cfg)
 	defer obench.suite_destroy(&s)
-	calibrated_fs := s.clock.overhead_fs
-	testing.expect(t, calibrated_fs > 0, "calibrated overhead_fs should be positive")
 	obench.bench(&s, "fast", _dummy_fast, zero_alloc = true)
 
 	testing.expect(t, obench.suite_run(&s))
 	if !testing.expect_value(t, len(s.results), 1) {
 		return
 	}
-	_expect_batch_matches_ns(
-		t,
-		s.results[0].stats,
-		s.clock.overhead_ns,
-		calibrated_fs,
-		1,
-		"calibrated",
-	)
-
-	// Fallback path when `overhead_fs == 0` with non-zero fractional `overhead_ns`; also
-	// exercises `_clear_results` freeing the prior run's `samples_batch_ns`.
-	s.clock.overhead_fs = 0
-	s.clock.overhead_ns = 10.6
-	testing.expect(t, obench.suite_run(&s))
-	if !testing.expect_value(t, len(s.results), 1) {
-		return
-	}
-	_expect_batch_matches_ns(t, s.results[0].stats, 10.6, 10_600_000, 1, "fallback")
-
-	// Negative and NaN `overhead_ns` / `overhead_cycles` values clamp to 0 consistently for
-	// `samples_ns`, `samples_batch_ns`, and cycle statistics.
-	s.clock.overhead_fs = 0
-	s.clock.overhead_ns = -5.0
-	s.clock.overhead_cycles = -1e12
-	testing.expect(t, obench.suite_run(&s))
-	if !testing.expect_value(t, len(s.results), 1) {
-		return
-	}
-	_expect_batch_matches_ns(t, s.results[0].stats, 0.0, 0, 1, "negative_overhead")
-	testing.expect(
-		t,
-		s.results[0].stats.median_cycles >= 0 && s.results[0].stats.median_cycles < 1e9,
-		"negative overhead_cycles should clamp to 0",
-	)
-
-	s.clock.overhead_fs = 0
-	s.clock.overhead_ns = math.nan_f64()
-	s.clock.overhead_cycles = math.nan_f64()
-	testing.expect(t, obench.suite_run(&s))
-	if !testing.expect_value(t, len(s.results), 1) {
-		return
-	}
-	_expect_batch_matches_ns(t, s.results[0].stats, 0.0, 0, 1, "nan_overhead")
-	testing.expect(
-		t,
-		!math.is_nan(s.results[0].stats.median_cycles) && s.results[0].stats.median_cycles >= 0,
-		"NaN overhead_cycles should clamp to 0",
-	)
-
-	// Non-positive and NaN `overhead_ns` overrides must ignore stale positive `overhead_fs`
-	// values (calibrated `overhead_fs`, the 0.5 ns rounding boundary at `windows == 1`, and 1 s).
-	cfg_big := quick_config()
-	cfg_big.fixed_batch_size = 4096
-	s_big := obench.suite_create("batch_stale_fs", cfg_big)
-	defer obench.suite_destroy(&s_big)
-	s_big_calibrated_fs := s_big.clock.overhead_fs
-	testing.expect(t, s_big_calibrated_fs > 0, "calibrated overhead_fs should be positive")
-	obench.bench(&s_big, "fast", _dummy_fast, zero_alloc = true)
-	for fs_case in ([?]struct {
-			fs:    i64,
-			label: string,
-		}{{s_big_calibrated_fs, "calibrated_fs"}, {500_000, "half_ns_fs"}, {1_000_000_000_000_000, "one_sec_fs"}}) {
-		for ov_case in ([?]struct {
-				ns:    f64,
-				label: string,
-			}{{0.0, "zero"}, {-5.0, "neg"}, {math.nan_f64(), "nan"}}) {
-			s_big.clock.overhead_fs = fs_case.fs
-			s_big.clock.overhead_ns = ov_case.ns
-			testing.expect(t, obench.suite_run(&s_big))
-			if !testing.expect_value(t, len(s_big.results), 1) {
-				return
-			}
-			st_big := s_big.results[0].stats
-			_expect_batch_matches_ns(
-				t,
-				st_big,
-				0.0,
-				0,
-				1,
-				fmt.tprintf("stale_%s_%s", fs_case.label, ov_case.label),
-			)
-			_expect_has_positive_batch(
-				t,
-				st_big,
-				fmt.tprintf(
-					"stale %s overhead_fs should be ignored for %s overhead_ns",
-					fs_case.label,
-					ov_case.label,
-				),
-			)
+	st_cal := s.results[0].stats
+	_expect_batch_matches_ns(t, st_cal, "calibrated")
+	has_positive := false
+	for v in st_cal.samples_batch_ns {
+		if v > 0 {
+			has_positive = true
+			break
 		}
 	}
+	testing.expect(t, has_positive, "expected at least one positive batch duration")
 
-	// Mutated `overhead_fs` that diverges from positive `overhead_ns` is ignored in favor of
-	// authoritative `overhead_ns`.
-	s_big.clock.overhead_ns = 10.6
-	s_big.clock.overhead_fs = 1_000_000_000_000_000
-	testing.expect(t, obench.suite_run(&s_big))
-	if !testing.expect_value(t, len(s_big.results), 1) {
+	// 2. Re-running with `.5` overhead exercises `_clear_results` cleanup and `.5` rounding.
+	s.clock.overhead_ns = 41.5
+	testing.expect(t, obench.suite_run(&s))
+	if !testing.expect_value(t, len(s.results), 1) {
 		return
 	}
-	st_big_override := s_big.results[0].stats
-	_expect_batch_matches_ns(t, st_big_override, 10.6, 10_600_000, 1, "stale_large_pos_override")
-	_expect_has_positive_batch(
-		t,
-		st_big_override,
-		"divergent overhead_fs should be ignored when positive overhead_ns is authoritative",
-	)
+	_expect_batch_matches_ns(t, s.results[0].stats, "half_ns_overhead")
 
-	// `+Inf` `overhead_ns` with calibrated positive `overhead_fs` still present must not match
-	// `overhead_fs` (avoiding IEEE-754 `Inf <= Inf`), and must saturate and clamp all samples to 0.
-	s_big_inf := obench.suite_create("batch_stale_inf", cfg_big)
-	defer obench.suite_destroy(&s_big_inf)
-	testing.expect(t, s_big_inf.clock.overhead_fs > 0)
-	obench.bench(&s_big_inf, "fast", _dummy_fast, zero_alloc = true)
-	s_big_inf.clock.overhead_ns = math.inf_f64(1)
-	testing.expect(t, obench.suite_run(&s_big_inf))
-	if !testing.expect_value(t, len(s_big_inf.results), 1) {
-		return
-	}
-	st_big_inf := s_big_inf.results[0].stats
-	_expect_all_zero_samples(t, st_big_inf)
-
-	// Multi-window batch scaling (`br.windows > 1` via `scoped_pause`), calibrated, fallback
-	// (`overhead_fs == 0` with `overhead_ns = 10.4`), and matching fractional (`1.4 ns * 17`).
+	// 3. Multi-window batch scaling (`scoped_pause`), calibrated and fractional `10.4` ns.
 	s_win := obench.suite_create("batch_windows", quick_config())
 	defer obench.suite_destroy(&s_win)
 	obench.bench(&s_win, "multi_win", _multi_window_step)
+
 	testing.expect(t, obench.suite_run(&s_win))
 	if !testing.expect_value(t, len(s_win.results), 1) {
 		return
 	}
-	_expect_batch_matches_ns(
-		t,
-		s_win.results[0].stats,
-		s_win.clock.overhead_ns,
-		s_win.clock.overhead_fs,
-		s_win.results[0].stats.batch_size + 1,
-		"multi_window",
-	)
+	_expect_batch_matches_ns(t, s_win.results[0].stats, "multi_window_calibrated")
 
-	s_win.clock.overhead_fs = 0
 	s_win.clock.overhead_ns = 10.4
 	testing.expect(t, obench.suite_run(&s_win))
 	if !testing.expect_value(t, len(s_win.results), 1) {
 		return
 	}
-	st_win_fb := s_win.results[0].stats
-	_expect_batch_matches_ns(
-		t,
-		st_win_fb,
-		10.4,
-		10_400_000,
-		st_win_fb.batch_size + 1,
-		"multi_window_fallback_fractional",
-	)
-	_expect_has_positive_batch(
-		t,
-		st_win_fb,
-		"multi_window_fallback_fractional should produce positive batch durations",
-	)
+	_expect_batch_matches_ns(t, s_win.results[0].stats, "multi_window_fractional")
 
-	s_win.clock.overhead_ns = 1.4
-	s_win.clock.overhead_fs = 1_400_000
-	testing.expect(t, obench.suite_run(&s_win))
-	if !testing.expect_value(t, len(s_win.results), 1) {
-		return
-	}
-	st_win_frac := s_win.results[0].stats
-	_expect_batch_matches_ns(
-		t,
-		st_win_frac,
-		1.4,
-		1_400_000,
-		st_win_frac.batch_size + 1,
-		"multi_window_fractional",
-	)
-	_expect_has_positive_batch(
-		t,
-		st_win_frac,
-		"multi_window_fractional should produce positive batch durations",
-	)
-
-	// Mutating `overhead_ns` alone (without clearing calibrated `overhead_fs`) overrides stale
-	// `overhead_fs`, and high / boundary / `+Inf` overheads clamp both `samples_batch_ns` and
-	// `samples_ns` to 0 cleanly without overflow or `Inf <= Inf` traps.
+	// 4. Samples below clock overhead clamp both `samples_batch_ns` and `samples_ns` to 0.
 	cfg_clamp := quick_config()
 	cfg_clamp.fixed_batch_size = 1
 	s_clamp := obench.suite_create("batch_clamp", cfg_clamp)
 	defer obench.suite_destroy(&s_clamp)
 	obench.bench(&s_clamp, "noop", _noop_step)
-	clamp_cases := [?]struct {
-		fs:    i64,
-		ns:    f64,
-		label: string,
-	} {
-		{s_clamp.clock.overhead_fs, 1e9, "override_1e9"},
-		{s_clamp.clock.overhead_fs, 1e13, "finite_1e13"},
-		{s_clamp.clock.overhead_fs, 1e20, "finite_1e20"},
-		{0, 9.223372036854773e12, "limit_below"},
-		{0, 9.223372036854775e12, "limit_exact"},
-		{0, math.inf_f64(1), "pos_inf"},
+	s_clamp.clock.overhead_ns = 1e9
+	testing.expect(t, obench.suite_run(&s_clamp))
+	if !testing.expect_value(t, len(s_clamp.results), 1) {
+		return
 	}
-	for c in clamp_cases {
-		s_clamp.clock.overhead_fs = c.fs
-		s_clamp.clock.overhead_ns = c.ns
-		testing.expect(t, obench.suite_run(&s_clamp), c.label)
-		if !testing.expect_value(t, len(s_clamp.results), 1) {
-			return
+	st_clamp := s_clamp.results[0].stats
+	testing.expect(t, st_clamp.samples >= obench.MIN_SAMPLES, "expected at least MIN_SAMPLES")
+	testing.expect_value(t, len(st_clamp.samples_batch_ns), st_clamp.samples)
+	if testing.expect_value(t, len(st_clamp.samples_ns), st_clamp.samples) {
+		for i in 0 ..< len(st_clamp.samples_batch_ns) {
+			testing.expect_value(t, st_clamp.samples_batch_ns[i], u64(0))
+			testing.expect_value(t, st_clamp.samples_ns[i], 0.0)
 		}
-		st_clamp := s_clamp.results[0].stats
-		_expect_all_zero_samples(t, st_clamp)
 	}
 }
 

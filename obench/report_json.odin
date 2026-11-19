@@ -394,14 +394,18 @@ _fill_baseline_map :: proc(
 			continue
 		}
 		st := _export_entry_stats(e)
-		st.samples_ns = slice.clone(st.samples_ns, allocator)
+		st.samples_ns = slice.clone(e.samples_ns, allocator)
 		st.samples_batch_ns = slice.clone(st.samples_batch_ns, allocator)
 		for i in 0 ..< st.custom_metrics_count {
 			st.custom_metrics[i].unit = strings.clone(st.custom_metrics[i].unit, allocator)
 		}
-		if old := &out_map[e.full_name]; old != nil {
-			_destroy_stats(old, allocator)
-			old^ = st
+		if old, found := out_map[e.full_name]; found {
+			delete(old.samples_ns, allocator)
+			delete(old.samples_batch_ns, allocator)
+			for i in 0 ..< old.custom_metrics_count {
+				delete(old.custom_metrics[i].unit, allocator)
+			}
+			out_map[e.full_name] = st
 		} else {
 			out_map[strings.clone(e.full_name, allocator)] = st
 		}
@@ -414,9 +418,13 @@ Frees a map filled by `load_baseline_file`: its keys, every entry's `samples_ns`
 `load_baseline_file`.
 */
 destroy_baseline_map :: proc(m: ^map[string]Stats, allocator: runtime.Allocator) {
-	for k, &st in m^ {
+	for k, st in m^ {
 		delete(k, allocator)
-		_destroy_stats(&st, allocator)
+		delete(st.samples_ns, allocator)
+		delete(st.samples_batch_ns, allocator)
+		for i in 0 ..< st.custom_metrics_count {
+			delete(st.custom_metrics[i].unit, allocator)
+		}
 	}
 	delete(m^)
 	m^ = nil

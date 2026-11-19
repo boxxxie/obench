@@ -3,6 +3,7 @@ package obench
 import "base:intrinsics"
 import "base:runtime"
 import "core:fmt"
+import "core:math"
 import "core:slice"
 import "core:strings"
 import "core:time"
@@ -330,8 +331,6 @@ _execute_entry :: proc(
 
 	arg_buf: [48]u8
 	batch_arg := fmt.bprintf(arg_buf[:], "batch=%d", batch_size)
-	ov_ns, ov_fs := _clock_resolve_overhead(s.clock)
-	ov_cyc := s.clock.overhead_cycles if s.clock.overhead_cycles > 0 else 0.0
 	sampling_start := time.tick_now()
 	for i := 0; i < sample_target; i += 1 {
 		// Peak live bytes are tracked per sample.
@@ -356,10 +355,10 @@ _execute_entry :: proc(
 
 		// A sample below the clock overhead is clamped to 0: the work is too small to see.
 		windows := f64(max(br.windows, 1))
-		adj_ns := max(f64(br.ns) - ov_ns * windows, 0)
-		adj_cyc := max(f64(br.cycles) - ov_cyc * windows, 0)
+		adj_ns := max(f64(br.ns) - s.clock.overhead_ns * windows, 0)
+		adj_cyc := max(f64(br.cycles) - s.clock.overhead_cycles * windows, 0)
 
-		adj_batch_ns := _clock_adjust_batch_ns(br.ns, br.windows, ov_ns, ov_fs)
+		adj_batch_ns := u64(math.round(adj_ns))
 
 		append(&ns_samples, adj_ns / f64(batch_size))
 		append(&batch_samples, adj_batch_ns)
