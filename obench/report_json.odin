@@ -15,9 +15,11 @@ versions; fields that are missing stay zero.
 
 Version 3 added `samples_ns` (every sample's time per operation) to each benchmark and
 `intercept` to each complexity fit. Version 4 added `untimed_allocs`: `false`, or missing in
-an older report, means allocations were counted in every timed sample.
+an older report, means allocations were counted in every timed sample. Version 5 added
+`samples_batch_ns` (every sample's overhead-adjusted integer batch duration in nanoseconds)
+to each benchmark.
 */
-REPORT_FORMAT_VERSION :: 4
+REPORT_FORMAT_VERSION :: 5
 
 /*
 Serializable record for a single benchmark in a JSON baseline or export file.
@@ -53,6 +55,7 @@ Export_Entry :: struct {
 	temp_bytes_per_op:  f64 `json:"temp_bytes_per_op"`,
 	custom_metrics:     []Custom_Metric `json:"custom_metrics,omitempty"`,
 	samples_ns:         []f64 `json:"samples_ns,omitempty"`,
+	samples_batch_ns:   []u64 `json:"samples_batch_ns,omitempty"`,
 }
 
 /*
@@ -131,6 +134,7 @@ export_document :: proc(
 			temp_bytes_per_op  = r.stats.temp_bytes_per_op,
 			custom_metrics     = r.stats.custom_metrics[:r.stats.custom_metrics_count],
 			samples_ns         = r.stats.samples_ns,
+			samples_batch_ns   = r.stats.samples_batch_ns,
 		}
 	}
 
@@ -199,6 +203,12 @@ save_json_report :: proc(s: ^Suite, path: string) -> Report_Error {
 /*
 Reads a JSON report written by obench. Everything, strings included, is allocated with
 `allocator`, so an arena or the temp allocator can free it all at once.
+
+Apart from backfilling missing `suite_name` fields on format version 1 entries, this
+procedure returns the raw decoded wire entries without validating per-entry invariants such
+as `samples_batch_ns`. Callers that convert entries into `Stats` (such as
+`load_baseline_file`, `suite_run`, and `write_comparison`) validate and drop invalid
+`samples_batch_ns` slices automatically.
 */
 @(require_results)
 read_json_report :: proc(
@@ -224,6 +234,23 @@ read_json_report :: proc(
 	return doc, nil
 }
 
+@(private, require_results)
+_valid_batch_samples :: proc(e: Export_Entry) -> []u64 {
+	if len(e.samples_batch_ns) == 0 || e.batch_size <= 0 || e.samples <= 0 {
+		return nil
+	}
+	if len(e.samples_batch_ns) != e.samples ||
+	   (len(e.samples_ns) > 0 && len(e.samples_batch_ns) != len(e.samples_ns)) {
+		return nil
+	}
+	for v in e.samples_batch_ns {
+		if v > u64(max(i64)) {
+			return nil
+		}
+	}
+	return e.samples_batch_ns
+}
+
 @(private)
 _export_entry_stats :: proc(e: Export_Entry) -> Stats {
 	st := Stats {
@@ -247,6 +274,7 @@ _export_entry_stats :: proc(e: Export_Entry) -> Stats {
 		temp_allocs_per_op = e.temp_allocs_per_op,
 		temp_bytes_per_op  = e.temp_bytes_per_op,
 		samples_ns         = e.samples_ns,
+		samples_batch_ns   = _valid_batch_samples(e),
 	}
 	cm_count := min(len(e.custom_metrics), MAX_CUSTOM_METRICS)
 	st.custom_metrics_count = cm_count
@@ -267,8 +295,11 @@ _has_several_suites :: proc(entries: []Export_Entry) -> bool {
 }
 
 /*
-Loads a saved JSON report into `out_map`, keyed by `full_name`. Keys and each entry's
-`samples_ns` are allocated with `allocator`; `destroy_baseline_map` frees them.
+Loads a saved JSON report into `out_map`, keyed by `full_name`. Keys and each valid entry's
+`samples_ns`, `samples_batch_ns`, and custom metric units are allocated with `allocator`;
+`destroy_baseline_map` frees them. Invalid `samples_batch_ns` slices (for example
+`samples <= 0`, `batch_size <= 0`, mismatched lengths, or values exceeding `max(i64)`) are
+dropped to `nil`.
 
 When the file holds several suites (a multi-package CLI run), or `match_suite` is set, only
 the entries of the suite named `suite_name` are loaded; otherwise a single-suite file is
@@ -364,11 +395,13 @@ _fill_baseline_map :: proc(
 		}
 		st := _export_entry_stats(e)
 		st.samples_ns = slice.clone(e.samples_ns, allocator)
+		st.samples_batch_ns = slice.clone(st.samples_batch_ns, allocator)
 		for i in 0 ..< st.custom_metrics_count {
 			st.custom_metrics[i].unit = strings.clone(st.custom_metrics[i].unit, allocator)
 		}
 		if old, found := out_map[e.full_name]; found {
 			delete(old.samples_ns, allocator)
+			delete(old.samples_batch_ns, allocator)
 			for i in 0 ..< old.custom_metrics_count {
 				delete(old.custom_metrics[i].unit, allocator)
 			}
@@ -380,13 +413,15 @@ _fill_baseline_map :: proc(
 }
 
 /*
-Frees a map filled by `load_baseline_file`: its keys, every entry's `samples_ns`, custom
-metric units, and the map. `allocator` must be the one passed to `load_baseline_file`.
+Frees a map filled by `load_baseline_file`: its keys, every entry's `samples_ns`,
+`samples_batch_ns`, custom metric units, and the map. `allocator` must be the one passed to
+`load_baseline_file`.
 */
 destroy_baseline_map :: proc(m: ^map[string]Stats, allocator: runtime.Allocator) {
 	for k, st in m^ {
 		delete(k, allocator)
 		delete(st.samples_ns, allocator)
+		delete(st.samples_batch_ns, allocator)
 		for i in 0 ..< st.custom_metrics_count {
 			delete(st.custom_metrics[i].unit, allocator)
 		}

@@ -3,6 +3,7 @@ package obench
 import "base:intrinsics"
 import "base:runtime"
 import "core:fmt"
+import "core:math"
 import "core:slice"
 import "core:strings"
 import "core:time"
@@ -294,6 +295,8 @@ _execute_entry :: proc(
 	initial_cap := min(sample_target, 1024)
 	ns_samples := make([dynamic]f64, 0, initial_cap, s.allocator)
 	defer delete(ns_samples)
+	batch_samples := make([dynamic]u64, 0, initial_cap, s.allocator)
+	defer delete(batch_samples)
 	cyc_samples := make([dynamic]f64, 0, initial_cap, s.allocator)
 	defer delete(cyc_samples)
 
@@ -355,7 +358,10 @@ _execute_entry :: proc(
 		adj_ns := max(f64(br.ns) - s.clock.overhead_ns * windows, 0)
 		adj_cyc := max(f64(br.cycles) - s.clock.overhead_cycles * windows, 0)
 
+		adj_batch_ns := u64(math.round(adj_ns))
+
 		append(&ns_samples, adj_ns / f64(batch_size))
+		append(&batch_samples, adj_batch_ns)
 		append(&cyc_samples, adj_cyc / f64(batch_size))
 		total_iters += u64(batch_size)
 
@@ -397,6 +403,7 @@ _execute_entry :: proc(
 		alloc_iters,
 	)
 	st.samples_ns = slice.clone(ns_samples[:], s.allocator)
+	st.samples_batch_ns = slice.clone(batch_samples[:], s.allocator)
 	last_custom_count = 0 // Ownership of the unit strings moves to the result.
 
 	// A `free` that doesn't pass the block's size never lowered the live bytes, so the peak

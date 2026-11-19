@@ -119,6 +119,7 @@ _clear_results :: proc(s: ^Suite) {
 	for &r in s.results {
 		delete(r.full_name, s.allocator)
 		delete(r.stats.samples_ns, s.allocator)
+		delete(r.stats.samples_batch_ns, s.allocator)
 		for i in 0 ..< r.stats.custom_metrics_count {
 			delete(r.stats.custom_metrics[i].unit, s.allocator)
 		}

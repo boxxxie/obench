@@ -6,6 +6,7 @@ import "core:encoding/json"
 import "core:fmt"
 import "core:math"
 import "core:os"
+import "core:path/filepath"
 import "core:slice"
 import "core:strconv"
 import "core:strings"
@@ -1565,4 +1566,270 @@ test_comparison_flags_reports_that_counted_allocations_differently :: proc(t: ^t
 	strings.builder_reset(&sb)
 	no_allocs := obench.write_comparison(strings.to_writer(&sb), timed, untimed, 2.0, false)
 	testing.expect(t, !no_allocs.alloc_counting_mismatch, "nothing allocates")
+}
+
+@(private = "file")
+_multi_window_step :: proc(b: ^obench.Bencher) {
+	acc := 0
+	for obench.step(b) {
+		{
+			obench.scoped_pause(b)
+			acc += obench.black_box(1)
+		}
+		for i in 0 ..< 128 {
+			acc += obench.black_box(i + 2)
+		}
+	}
+	_ = obench.black_box(acc)
+}
+
+@(private = "file")
+_expect_batch_matches_ns :: proc(
+	t: ^testing.T,
+	st: obench.Stats,
+	label: string,
+	loc := #caller_location,
+) {
+	testing.expect(t, st.samples >= obench.MIN_SAMPLES, "expected at least MIN_SAMPLES", loc = loc)
+	if !testing.expect(t, st.batch_size > 0, "expected positive batch_size", loc = loc) {
+		return
+	}
+	testing.expect_value(t, len(st.samples_batch_ns), st.samples, loc = loc)
+	if !testing.expect_value(t, len(st.samples_batch_ns), len(st.samples_ns), loc = loc) {
+		return
+	}
+	for i in 0 ..< len(st.samples_batch_ns) {
+		diff := math.abs(f64(st.samples_batch_ns[i]) - st.samples_ns[i] * f64(st.batch_size))
+		testing.expectf(
+			t,
+			diff <= 0.5 + 1e-9,
+			"%s sample %d: batch_ns=%d ns_per_op=%v batch_size=%d diff=%v",
+			label,
+			i,
+			st.samples_batch_ns[i],
+			st.samples_ns[i],
+			st.batch_size,
+			diff,
+			loc = loc,
+		)
+	}
+}
+
+@(test)
+test_samples_batch_ns_matches_rounded_adj_ns :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+
+	// 1. Standard calibrated suite run plus positive batch duration check.
+	cfg := quick_config()
+	s := obench.suite_create("batch_samples", cfg)
+	defer obench.suite_destroy(&s)
+	obench.bench(&s, "fast", _dummy_fast, zero_alloc = true)
+
+	testing.expect(t, obench.suite_run(&s))
+	if !testing.expect_value(t, len(s.results), 1) {
+		return
+	}
+	st_cal := s.results[0].stats
+	_expect_batch_matches_ns(t, st_cal, "calibrated")
+	has_positive := false
+	for v in st_cal.samples_batch_ns {
+		if v > 0 {
+			has_positive = true
+			break
+		}
+	}
+	testing.expect(t, has_positive, "expected at least one positive batch duration")
+
+	// 2. Re-running with `.5` overhead exercises `_clear_results` cleanup and `.5` rounding.
+	s.clock.overhead_ns = 41.5
+	testing.expect(t, obench.suite_run(&s))
+	if !testing.expect_value(t, len(s.results), 1) {
+		return
+	}
+	_expect_batch_matches_ns(t, s.results[0].stats, "half_ns_overhead")
+
+	// 3. Multi-window batch scaling (`scoped_pause`), calibrated and fractional `10.4` ns.
+	s_win := obench.suite_create("batch_windows", quick_config())
+	defer obench.suite_destroy(&s_win)
+	obench.bench(&s_win, "multi_win", _multi_window_step)
+
+	testing.expect(t, obench.suite_run(&s_win))
+	if !testing.expect_value(t, len(s_win.results), 1) {
+		return
+	}
+	_expect_batch_matches_ns(t, s_win.results[0].stats, "multi_window_calibrated")
+
+	s_win.clock.overhead_ns = 10.4
+	testing.expect(t, obench.suite_run(&s_win))
+	if !testing.expect_value(t, len(s_win.results), 1) {
+		return
+	}
+	_expect_batch_matches_ns(t, s_win.results[0].stats, "multi_window_fractional")
+
+	// 4. Samples below clock overhead clamp both `samples_batch_ns` and `samples_ns` to 0.
+	cfg_clamp := quick_config()
+	cfg_clamp.fixed_batch_size = 1
+	s_clamp := obench.suite_create("batch_clamp", cfg_clamp)
+	defer obench.suite_destroy(&s_clamp)
+	obench.bench(&s_clamp, "noop", _noop_step)
+	s_clamp.clock.overhead_ns = 1e9
+	testing.expect(t, obench.suite_run(&s_clamp))
+	if !testing.expect_value(t, len(s_clamp.results), 1) {
+		return
+	}
+	st_clamp := s_clamp.results[0].stats
+	testing.expect(t, st_clamp.samples >= obench.MIN_SAMPLES, "expected at least MIN_SAMPLES")
+	testing.expect_value(t, len(st_clamp.samples_batch_ns), st_clamp.samples)
+	if testing.expect_value(t, len(st_clamp.samples_ns), st_clamp.samples) {
+		for i in 0 ..< len(st_clamp.samples_batch_ns) {
+			testing.expect_value(t, st_clamp.samples_batch_ns[i], u64(0))
+			testing.expect_value(t, st_clamp.samples_ns[i], 0.0)
+		}
+	}
+}
+
+@(test)
+test_samples_batch_ns_json_roundtrip_and_v4_compat :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	tmp_dir, tmp_err := os.make_directory_temp("", "obench-test-*", context.temp_allocator)
+	if !testing.expect_value(t, tmp_err, nil) {
+		return
+	}
+	defer _ = os.remove_all(tmp_dir)
+	path, _ := filepath.join({tmp_dir, "batch_samples.json"}, context.temp_allocator)
+	v4_path, _ := filepath.join({tmp_dir, "v4_compat.json"}, context.temp_allocator)
+	mismatch_path, _ := filepath.join({tmp_dir, "mismatch_batch.json"}, context.temp_allocator)
+
+	cfg := quick_config()
+	cfg.baseline_save_path = path
+	s := obench.suite_create("batch_roundtrip", cfg)
+	defer obench.suite_destroy(&s)
+	obench.bench(&s, "fast", _dummy_fast, zero_alloc = true)
+	testing.expect(t, obench.suite_run(&s))
+	if !testing.expect_value(t, len(s.results), 1) {
+		return
+	}
+
+	raw_v5, raw_err := os.read_entire_file(path, context.temp_allocator)
+	testing.expect_value(t, raw_err, nil)
+	testing.expect(
+		t,
+		strings.contains(string(raw_v5), `"samples_batch_ns"`),
+		"v5 JSON should serialize samples_batch_ns",
+	)
+
+	doc, read_err := obench.read_json_report(path, context.temp_allocator)
+	testing.expect_value(t, read_err, nil)
+	testing.expect_value(t, doc.format_version, obench.REPORT_FORMAT_VERSION)
+	testing.expect_value(t, doc.format_version, 5)
+	if testing.expect_value(t, len(doc.benchmarks), 1) {
+		testing.expect(
+			t,
+			slice.equal(doc.benchmarks[0].samples_batch_ns, s.results[0].stats.samples_batch_ns),
+			"read_json_report Export_Entry samples_batch_ns should match suite result",
+		)
+	}
+
+	empty_entries := []obench.Export_Entry {
+		{suite_name = "empty", full_name = "no_batch", group_name = "", name = "no_batch"},
+	}
+	empty_doc := obench.Export_Document {
+		format_version = obench.REPORT_FORMAT_VERSION,
+		suite_name     = "empty",
+		benchmarks     = empty_entries,
+	}
+	empty_sb := strings.builder_make(context.temp_allocator)
+	testing.expect_value(
+		t,
+		obench.write_json_document(strings.to_writer(&empty_sb), empty_doc),
+		nil,
+	)
+	testing.expect(
+		t,
+		!strings.contains(strings.to_string(empty_sb), `"samples_batch_ns"`),
+		"empty samples_batch_ns should be omitted from JSON output via omitempty",
+	)
+
+	loaded := make(map[string]obench.Stats)
+	defer obench.destroy_baseline_map(&loaded, context.allocator)
+	testing.expect_value(t, obench.load_baseline_file(path, &loaded, context.allocator), nil)
+
+	st, ok := loaded["fast"]
+	testing.expect(t, ok)
+	testing.expect(
+		t,
+		slice.equal(st.samples_batch_ns, s.results[0].stats.samples_batch_ns),
+		"loaded samples_batch_ns should match suite result",
+	)
+
+	// Reloading into the same map tests duplicate-key overwrite cleanup without leaks.
+	testing.expect_value(t, obench.load_baseline_file(path, &loaded, context.allocator), nil)
+	st2, ok2 := loaded["fast"]
+	testing.expect(t, ok2)
+	testing.expect(
+		t,
+		slice.equal(st2.samples_batch_ns, s.results[0].stats.samples_batch_ns),
+		"overwritten samples_batch_ns should match suite result",
+	)
+
+	// Older v4 JSON report without `samples_batch_ns` loads cleanly with empty slice.
+	v4_json := `{"format_version":4,"suite_name":"v4","untimed_allocs":true,"benchmarks":[{"suite_name":"v4","full_name":"legacy","group_name":"","name":"legacy","samples":3,"batch_size":10,"min_ns":10.0,"p50_ns":11.0,"p95_ns":12.0,"p99_ns":12.0,"max_ns":12.0,"mean_ns":11.0,"samples_ns":[10.0,11.0,12.0]}]}`
+	testing.expect_value(t, os.write_entire_file(v4_path, v4_json), nil)
+
+	v4_loaded := make(map[string]obench.Stats)
+	defer obench.destroy_baseline_map(&v4_loaded, context.allocator)
+	testing.expect_value(t, obench.load_baseline_file(v4_path, &v4_loaded, context.allocator), nil)
+	v4_st, v4_ok := v4_loaded["legacy"]
+	testing.expect(t, v4_ok)
+	testing.expect_value(t, len(v4_st.samples_ns), 3)
+	testing.expect_value(t, len(v4_st.samples_batch_ns), 0)
+	testing.expect(t, v4_st.samples_batch_ns == nil, "missing samples_batch_ns should stay nil")
+
+	// Malformed JSON reports drop `samples_batch_ns` cleanly across all validation branches:
+	// 1) mismatch against `samples_ns` (`samples == len(samples_batch_ns)`),
+	// 2) mismatch against `samples` with omitted `samples_ns`,
+	// 3) invalid `batch_size <= 0`, 4) `samples == 0` with omitted `samples_ns`,
+	// 5) `samples == 0` with present `samples_ns`,
+	// 6) elements exceeding `max(i64)` (`max(i64) + 1` and `max(u64)`), while keeping `max(i64)`.
+	mismatch_json :=
+		`{"format_version":5,"suite_name":"bad","benchmarks":[` +
+		`{"suite_name":"bad","full_name":"mm_ns","group_name":"","name":"mm_ns","samples":2,"batch_size":10,"min_ns":10.0,"p50_ns":11.0,"p95_ns":12.0,"p99_ns":12.0,"max_ns":12.0,"mean_ns":11.0,"samples_ns":[10.0,11.0,12.0],"samples_batch_ns":[100,110]},` +
+		`{"suite_name":"bad","full_name":"mm_cnt","group_name":"","name":"mm_cnt","samples":3,"batch_size":10,"min_ns":10.0,"p50_ns":11.0,"p95_ns":12.0,"p99_ns":12.0,"max_ns":12.0,"mean_ns":11.0,"samples_batch_ns":[100,101]},` +
+		`{"suite_name":"bad","full_name":"bad_bs","group_name":"","name":"bad_bs","samples":3,"batch_size":0,"min_ns":10.0,"p50_ns":11.0,"p95_ns":12.0,"p99_ns":12.0,"max_ns":12.0,"mean_ns":11.0,"samples_batch_ns":[100,101,102]},` +
+		`{"suite_name":"bad","full_name":"zero_cnt","group_name":"","name":"zero_cnt","samples":0,"batch_size":10,"min_ns":10.0,"p50_ns":11.0,"p95_ns":12.0,"p99_ns":12.0,"max_ns":12.0,"mean_ns":11.0,"samples_batch_ns":[100,101]},` +
+		`{"suite_name":"bad","full_name":"zero_cnt_ns","group_name":"","name":"zero_cnt_ns","samples":0,"batch_size":10,"min_ns":10.0,"p50_ns":11.0,"p95_ns":12.0,"p99_ns":12.0,"max_ns":12.0,"mean_ns":11.0,"samples_ns":[10.0,11.0],"samples_batch_ns":[100,110]},` +
+		`{"suite_name":"bad","full_name":"over_i64","group_name":"","name":"over_i64","samples":2,"batch_size":10,"min_ns":10.0,"p50_ns":11.0,"p95_ns":12.0,"p99_ns":12.0,"max_ns":12.0,"mean_ns":11.0,"samples_ns":[10.0,11.0],"samples_batch_ns":[100,9223372036854775808]},` +
+		`{"suite_name":"bad","full_name":"max_u64","group_name":"","name":"max_u64","samples":2,"batch_size":10,"min_ns":10.0,"p50_ns":11.0,"p95_ns":12.0,"p99_ns":12.0,"max_ns":12.0,"mean_ns":11.0,"samples_ns":[10.0,11.0],"samples_batch_ns":[100,18446744073709551615]},` +
+		`{"suite_name":"bad","full_name":"max_i64_ok","group_name":"","name":"max_i64_ok","samples":2,"batch_size":10,"min_ns":10.0,"p50_ns":11.0,"p95_ns":12.0,"p99_ns":12.0,"max_ns":12.0,"mean_ns":11.0,"samples_ns":[10.0,11.0],"samples_batch_ns":[0,9223372036854775807]}` +
+		`]}`
+	testing.expect_value(t, os.write_entire_file(mismatch_path, mismatch_json), nil)
+
+	mismatch_loaded := make(map[string]obench.Stats)
+	defer obench.destroy_baseline_map(&mismatch_loaded, context.allocator)
+	testing.expect_value(
+		t,
+		obench.load_baseline_file(mismatch_path, &mismatch_loaded, context.allocator),
+		nil,
+	)
+	for key in ([]string{"mm_ns", "mm_cnt", "bad_bs", "zero_cnt", "zero_cnt_ns", "over_i64", "max_u64"}) {
+		mm_st, mm_ok := mismatch_loaded[key]
+		testing.expect(t, mm_ok)
+		testing.expect_value(t, len(mm_st.samples_batch_ns), 0)
+		testing.expect(
+			t,
+			mm_st.samples_batch_ns == nil,
+			"invalid samples_batch_ns should be dropped",
+		)
+	}
+	testing.expect_value(t, len(mismatch_loaded["mm_ns"].samples_ns), 3)
+	testing.expect_value(t, len(mismatch_loaded["zero_cnt_ns"].samples_ns), 2)
+	testing.expect_value(t, len(mismatch_loaded["over_i64"].samples_ns), 2)
+
+	ok_st, ok_found := mismatch_loaded["max_i64_ok"]
+	testing.expect(t, ok_found)
+	testing.expect(
+		t,
+		slice.equal(ok_st.samples_batch_ns, []u64{0, u64(max(i64))}),
+		"samples_batch_ns up to max(i64) should be preserved",
+	)
 }
