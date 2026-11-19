@@ -1,6 +1,7 @@
 package obench
 
 import "base:intrinsics"
+import "base:runtime"
 import "core:math"
 import "core:slice"
 
@@ -80,6 +81,29 @@ Stats :: struct {
 	// each `Result`, and `load_baseline_file` allocates one per entry. Empty for reports
 	// written before format version 3.
 	samples_ns:           []f64,
+	// Whole-batch overhead-adjusted integer duration (in nanoseconds) of every sample in the
+	// order taken, not divided by `batch_size`. Every value lies in `0 ..= u64(max(i64))`.
+	// Per-window clock overhead is scaled in integer femtoseconds (from
+	// `Clock_Calibration.overhead_fs`, or `overhead_ns` rounded to femtoseconds when overridden)
+	// across all timed windows in the batch and rounded to the nearest nanosecond. Near the
+	// clock-overhead noise floor, rounding and per-window femtosecond quantization mean
+	// `samples_batch_ns[i] == 0` and `samples_ns[i] == 0` can disagree. `compute_stats` leaves
+	// it `nil`. The suite keeps its own copy in each `Result`, and `load_baseline_file` allocates
+	// one per entry when valid. Empty for reports written before format version 5.
+	samples_batch_ns:     []u64,
+}
+
+// Frees heap slices and custom-metric unit strings owned by `st`.
+@(private)
+_destroy_stats :: proc(st: ^Stats, allocator: runtime.Allocator) {
+	delete(st.samples_ns, allocator)
+	delete(st.samples_batch_ns, allocator)
+	for i in 0 ..< st.custom_metrics_count {
+		delete(st.custom_metrics[i].unit, allocator)
+	}
+	st.samples_ns = nil
+	st.samples_batch_ns = nil
+	st.custom_metrics_count = 0
 }
 
 /*

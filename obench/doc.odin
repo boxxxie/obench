@@ -199,8 +199,10 @@ reports without running anything:
 A change counts as a regression when the Mann-Whitney U test on the two runs' samples finds
 a difference at the 5% level and the median moved by more than `--threshold` percent (2% by
 default). The test works on ranks, so a few very slow samples in either run can't hide a
-shift of the rest. Reports keep every sample for this (`samples_ns`, since format version 3).
-Against an older report without samples, Welch's t-test on the means is used instead.
+shift of the rest. Reports keep every sample for this (`samples_ns`, since format version 3),
+along with each sample's overhead-adjusted integer batch duration (`samples_batch_ns`, since
+format version 5) for downstream exact integer analysis. Against an older report without
+samples, Welch's t-test on the means is used instead.
 `--fail-on-regression` turns regressions into exit status 1, which makes it usable as a CI
 gate. A baseline file that can't be read also fails the run, so a typo in the path doesn't
 pass silently. A baseline that holds none of a suite's benchmarks (a renamed suite, or the

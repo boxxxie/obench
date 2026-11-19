@@ -1,6 +1,7 @@
 package obench
 
 import "base:intrinsics"
+import "core:math"
 import "core:time"
 
 when ODIN_OS != .Linux {
@@ -27,8 +28,16 @@ Timestamp :: struct {
 }
 
 // Calibrated properties of the benchmark clock.
+//
+// `overhead_ns` is authoritative for clock-overhead subtraction. `overhead_fs` stores the
+// calibrated per-window overhead in femtoseconds alongside `overhead_ns` for sub-nanosecond
+// batch scaling, and is only used when it agrees with `overhead_ns`. Setting or mutating
+// `overhead_fs` alone without a matching `overhead_ns` has no effect; if a caller modifies
+// `overhead_ns` directly after calibration, the runner detects the divergence and derives the
+// integer batch overhead from `overhead_ns`.
 Clock_Calibration :: struct {
 	overhead_ns:       f64, // Cost of one timed window (two back-to-back `clock_now` calls).
+	overhead_fs:       i64, // Cost of one timed window in femtoseconds (1e-6 ns).
 	overhead_cycles:   f64, // Same as `overhead_ns`, in cycles. 0 without a cycle counter.
 	resolution_ns:     f64, // Smallest observed non-zero tick difference.
 	has_cycle_counter: bool, // Mirrors `CYCLE_COUNTER_SUPPORTED`.
@@ -76,23 +85,30 @@ Taking the lowest block drops blocks hit by an interrupt.
 clock_calibrate :: proc "contextless" () -> Clock_Calibration {
 	BLOCKS :: 16
 	WINDOWS_PER_BLOCK :: 256
-	best_ns := max(f64)
+	best_sum_ns: i128 = max(i128)
 	best_cycles := max(f64)
 
 	for _ in 0 ..< BLOCKS {
-		sum_ns: i64 = 0
+		sum_ns: i128 = 0
 		sum_cycles: u64 = 0
 		for _ in 0 ..< WINDOWS_PER_BLOCK {
 			t0 := clock_now()
 			clobber_memory()
 			t1 := clock_now()
 			ns, cyc := clock_elapsed(t0, t1)
-			sum_ns += ns
+			sum_ns += i128(ns)
 			sum_cycles += cyc
 		}
-		best_ns = min(best_ns, f64(sum_ns) / WINDOWS_PER_BLOCK)
-		best_cycles = min(best_cycles, f64(sum_cycles) / WINDOWS_PER_BLOCK)
+		if sum_ns >= 0 {
+			best_sum_ns = min(best_sum_ns, sum_ns)
+			best_cycles = min(best_cycles, f64(sum_cycles) / WINDOWS_PER_BLOCK)
+		}
 	}
+	if best_sum_ns == max(i128) {
+		best_sum_ns = 0
+		best_cycles = 0
+	}
+	best_ns := f64(best_sum_ns) / WINDOWS_PER_BLOCK
 
 	// Resolution: the smallest non-zero step of the monotonic clock.
 	min_step: i64 = max(i64)
@@ -115,8 +131,81 @@ clock_calibrate :: proc "contextless" () -> Clock_Calibration {
 
 	return Clock_Calibration {
 		overhead_ns = best_ns,
+		overhead_fs = i64(
+			min(
+				(best_sum_ns * 1_000_000 + WINDOWS_PER_BLOCK / 2) / WINDOWS_PER_BLOCK,
+				i128(max(i64)),
+			),
+		),
 		overhead_cycles = best_cycles,
 		resolution_ns = f64(min_step),
 		has_cycle_counter = CYCLE_COUNTER_SUPPORTED,
 	}
+}
+
+@(private = "file")
+// Smallest `f64` nanosecond overhead where `math.round(ov_ns * 1e6) >= 2^63` (overflows `i64` fs).
+_OVERHEAD_FS_LIMIT_NS :: 9.223372036854775e12
+
+@(private = "file")
+// Exact `2^63` as `f64` (`max(i64) + 1`). Any batch overhead `>= _TWO_POW_63` clamps every
+// `i64` duration to `0`.
+_TWO_POW_63 :: 9223372036854775808.0
+
+// Resolves per-window clock overhead into a non-negative `f64` nanosecond value and an
+// integer femtosecond value (capped at `max(i64)` fs so `ov_fs * win_cnt + 500_000` never
+// overflows `i128` for any `win_cnt <= max(i64)`).
+//
+// `overhead_ns` is authoritative: negative and `NaN` values clamp to `0`, and `overhead_fs`
+// is used only when it agrees with `overhead_ns` within rounding tolerance.
+@(private, require_results)
+_clock_resolve_overhead :: proc "contextless" (
+	clock: Clock_Calibration,
+) -> (
+	ov_ns: f64,
+	ov_fs: i128,
+) {
+	ov_ns = clock.overhead_ns if clock.overhead_ns > 0 else 0.0
+	if ov_ns == 0 {
+		return 0.0, 0
+	}
+	fs_matches_ns :=
+		!math.is_inf(ov_ns, 0) &&
+		clock.overhead_fs > 0 &&
+		abs(f64(clock.overhead_fs) / 1_000_000.0 - ov_ns) <= 5e-7 + 1e-12 * max(ov_ns, 1.0)
+	if fs_matches_ns {
+		return ov_ns, i128(clock.overhead_fs)
+	}
+	if ov_ns >= _OVERHEAD_FS_LIMIT_NS {
+		return ov_ns, i128(max(i64))
+	}
+	return ov_ns, i128(i64(math.round(ov_ns * 1_000_000.0)))
+}
+
+// Computes the overhead-adjusted integer batch duration (in nanoseconds) for `raw_ns` across
+// `windows` timed windows, given `(ov_ns, ov_fs)` from `_clock_resolve_overhead`.
+@(private, require_results)
+_clock_adjust_batch_ns :: proc "contextless" (
+	raw_ns: i64,
+	windows: int,
+	ov_ns: f64,
+	ov_fs: i128,
+) -> u64 {
+	if raw_ns <= 0 {
+		return 0
+	}
+	win_cnt := max(windows, 1)
+	if ov_ns >= _OVERHEAD_FS_LIMIT_NS {
+		// Above `_OVERHEAD_FS_LIMIT_NS` (including `+Inf`), `ov_ns` cannot be represented as
+		// `i64` femtoseconds. Scale directly in `f64` to stay continuous with `adj_ns` and
+		// clamp any total overhead `>= 2^63` (or `+Inf`) unconditionally to `0`.
+		ov_batch_f := ov_ns * f64(win_cnt)
+		if !(ov_batch_f < _TWO_POW_63) {
+			return 0
+		}
+		ov_batch_ns := i128(i64(math.round(ov_batch_f)))
+		return u64(max(i128(raw_ns) - ov_batch_ns, 0))
+	}
+	ov_batch_ns := (ov_fs * i128(win_cnt) + 500_000) / 1_000_000
+	return u64(max(i128(raw_ns) - ov_batch_ns, 0))
 }
