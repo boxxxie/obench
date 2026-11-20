@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.4.0](https://github.com/boxxxie/obench/compare/v0.3.0...v0.4.0) (2026-11-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* count allocations outside the timed samples by default ([#20](https://github.com/boxxxie/obench/issues/20))
+* correct measurement, reporting, and CLI discovery issues found in review ([#2](https://github.com/boxxxie/obench/issues/2))
+
+### Features
+
+* add --fail-on-alloc-regression ([#61](https://github.com/boxxxie/obench/issues/61)) ([bece714](https://github.com/boxxxie/obench/commit/bece71423a860e2b63a78978a840e04c4403fd3f))
+* add silent suite_execute API and preserve custom_metrics in baselines ([#17](https://github.com/boxxxie/obench/issues/17)) ([f6e8243](https://github.com/boxxxie/obench/commit/f6e82438d695c9cafd6bb58aec280b8d4b4b9f15))
+* add untimed allocation counting option (--untimed-allocs) ([#15](https://github.com/boxxxie/obench/issues/15)) ([3387a08](https://github.com/boxxxie/obench/commit/3387a0848b79aff52436ccbd02855d89e843cc70))
+* **cli:** add --extra-linker-flags, --custom-attribute, and --ols ([#16](https://github.com/boxxxie/obench/issues/16)) ([3f199a8](https://github.com/boxxxie/obench/commit/3f199a80a1b07dfbc80ee5640e03cdbae7aa3fdf))
+* micro-benchmarking library and CLI for Odin ([13548c9](https://github.com/boxxxie/obench/commit/13548c95da9f8b0a6053ebe7482b1df977ec8216))
+* record integer samples_batch_ns in reports ([#21](https://github.com/boxxxie/obench/issues/21)) ([158791a](https://github.com/boxxxie/obench/commit/158791ac87d0ce215d34317ebed457ee594e8367))
+
+
+### Bug Fixes
+
+* **cli:** fail the run when the compiler builds nothing ([#9](https://github.com/boxxxie/obench/issues/9)) ([a13f222](https://github.com/boxxxie/obench/commit/a13f222a03ccf9b54d1bc2711ae42ee1f5b70d9a))
+* **cli:** skip #+test files during discovery ([#11](https://github.com/boxxxie/obench/issues/11)) ([41425ff](https://github.com/boxxxie/obench/commit/41425ff55f4f24d67df2dde161aab44a8f878c19))
+* correct measurement, reporting, and CLI discovery issues found in review ([#2](https://github.com/boxxxie/obench/issues/2)) ([8f8c3c0](https://github.com/boxxxie/obench/commit/8f8c3c0eaa862e49a968df5b67e991c30797f61a))
+* count allocations outside the timed samples by default ([#20](https://github.com/boxxxie/obench/issues/20)) ([74bc973](https://github.com/boxxxie/obench/commit/74bc973a387b966c95c4903c6110af9e7f39ed48))
+* fail the gate on a baseline from another build ([#10](https://github.com/boxxxie/obench/issues/10)) ([d41e38b](https://github.com/boxxxie/obench/commit/d41e38bc8e67c2af44a23efbeb56fbe5c33c4074))
+* flag samples clamped below the clock overhead ([#60](https://github.com/boxxxie/obench/issues/60)) ([2fd315a](https://github.com/boxxxie/obench/commit/2fd315a6dbe701962b75da9fc890ec9101d5cbdd))
+* measure peak_heap_bytes correctly when benchmarks use free ([#13](https://github.com/boxxxie/obench/issues/13)) ([8f2dd6e](https://github.com/boxxxie/obench/commit/8f2dd6e8262d3605c2b4650bc3fa8a48c720c92a))
+* turn colors off outside a terminal and honor NO_COLOR in compare ([#59](https://github.com/boxxxie/obench/issues/59)) ([8a71e42](https://github.com/boxxxie/obench/commit/8a71e42122899602a7ff47a988c13a2cc4d13a91))
+
+
+### Performance Improvements
+
+* use libc vDSO clock_gettime on Linux ([#14](https://github.com/boxxxie/obench/issues/14)) ([5a25b0d](https://github.com/boxxxie/obench/commit/5a25b0d4864a39345d02451d56a05ff6f5e4ad9d))
+
 ## [0.3.0](https://github.com/zeybek/obench/compare/v0.2.1...v0.3.0) (2026-11-18)
 
 
